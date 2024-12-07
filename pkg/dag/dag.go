@@ -5,14 +5,14 @@ import (
 	"sync"
 )
 
-// DAG represents a directed acyclic graph of events
+// DAG manages the directed acyclic graph of events
 type DAG struct {
 	mu     sync.RWMutex
-	events map[string]*Event // Map of event ID to event
+	events map[string]*Event
 }
 
-// New creates a new empty DAG
-func New() *DAG {
+// NewDAG creates a new DAG instance
+func NewDAG() *DAG {
 	return &DAG{
 		events: make(map[string]*Event),
 	}
@@ -22,11 +22,6 @@ func New() *DAG {
 func (d *DAG) AddEvent(event *Event) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	// Verify event has an ID
-	if event.ID == "" {
-		return fmt.Errorf("event has no ID")
-	}
 
 	// Check if event already exists
 	if _, exists := d.events[event.ID]; exists {
@@ -41,24 +36,22 @@ func (d *DAG) AddEvent(event *Event) error {
 	}
 
 	// If this is a sub-event, verify parent event exists
-	if event.ParentEvent != "" {
+	if event.IsSubEvent {
 		if _, exists := d.events[event.ParentEvent]; !exists {
-			return fmt.Errorf("parent event %s does not exist", event.ParentEvent)
+			return fmt.Errorf("parent event %s for sub-event does not exist", event.ParentEvent)
 		}
 	}
 
-	// Only check for cycles if this is not a sub-event
-	if !event.IsSubEvent {
-		if err := d.wouldCreateCycle(event); err != nil {
-			return fmt.Errorf("adding event would create cycle: %w", err)
-		}
+	// Verify adding this event won't create a cycle
+	if err := d.detectCycle(event); err != nil {
+		return fmt.Errorf("adding event would create cycle: %w", err)
 	}
 
-	// Add the event
+	// Add event to DAG
 	d.events[event.ID] = event
 
-	// Update parent event's sub-events list if this is a sub-event
-	if event.ParentEvent != "" {
+	// If this is a sub-event, update the parent event's sub-events list
+	if event.IsSubEvent {
 		parentEvent := d.events[event.ParentEvent]
 		parentEvent.AddSubEvent(event.ID)
 	}
@@ -66,61 +59,57 @@ func (d *DAG) AddEvent(event *Event) error {
 	return nil
 }
 
-// wouldCreateCycle checks if adding the event would create a cycle
-func (d *DAG) wouldCreateCycle(newEvent *Event) error {
-	// For each parent, check if we can reach any other parent by following parent links
-	for i, startParentID := range newEvent.Parents {
-		visited := make(map[string]bool)
+// detectCycle checks if adding the new event would create a cycle
+func (d *DAG) detectCycle(newEvent *Event) error {
+	visited := make(map[string]bool)
+	path := make(map[string]bool)
 
-		var canReach func(currentID string, targetID string) bool
-		canReach = func(currentID string, targetID string) bool {
-			if currentID == targetID {
-				return true
-			}
-
-			if visited[currentID] {
-				return false
-			}
-			visited[currentID] = true
-
-			// Get the current event
-			currentEvent := d.events[currentID]
-			if currentEvent == nil {
-				return false
-			}
-
-			// Only follow non-sub-event parent relationships
-			for _, parentID := range currentEvent.Parents {
-				parentEvent := d.events[parentID]
-				if parentEvent == nil || parentEvent.IsSubEvent {
-					continue
-				}
-
-				if canReach(parentID, targetID) {
-					return true
-				}
-			}
-
-			return false
+	var visit func(eventID string, isSubEventPath bool) error
+	visit = func(eventID string, isSubEventPath bool) error {
+		if path[eventID] {
+			return fmt.Errorf("cycle detected at event %s", eventID)
+		}
+		if visited[eventID] {
+			return nil
 		}
 
-		// Check if we can reach any other parent from this one
-		for j, endParentID := range newEvent.Parents {
-			if i != j {
-				// Reset visited map for each check
-				visited = make(map[string]bool)
+		visited[eventID] = true
+		path[eventID] = true
 
-				if canReach(startParentID, endParentID) {
-					return fmt.Errorf("cycle detected: can reach parent %s from parent %s", endParentID, startParentID)
+		event := d.events[eventID]
+		if event != nil {
+			// Check parent relationships
+			for _, parentID := range event.Parents {
+				if err := visit(parentID, false); err != nil {
+					return err
 				}
 			}
+
+			// Only follow sub-event relationships if we're not already on a sub-event path
+			if !isSubEventPath {
+				for _, subEventID := range event.SubEvents {
+					if err := visit(subEventID, true); err != nil {
+						return err
+					}
+				}
+			}
+		}
+
+		path[eventID] = false
+		return nil
+	}
+
+	// Check paths from new event's parents
+	for _, parentID := range newEvent.Parents {
+		if err := visit(parentID, newEvent.IsSubEvent); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-// GetEvent retrieves an event by its ID
+// GetEvent retrieves an event by ID
 func (d *DAG) GetEvent(id string) (*Event, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -129,52 +118,11 @@ func (d *DAG) GetEvent(id string) (*Event, error) {
 	if !exists {
 		return nil, fmt.Errorf("event %s not found", id)
 	}
-
 	return event, nil
 }
 
-// GetSubEvents retrieves all sub-events for a given event
-func (d *DAG) GetSubEvents(eventID string) ([]*Event, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	event, exists := d.events[eventID]
-	if !exists {
-		return nil, fmt.Errorf("event %s not found", eventID)
-	}
-
-	subEvents := make([]*Event, 0, len(event.SubEvents))
-	for _, subEventID := range event.SubEvents {
-		if subEvent, exists := d.events[subEventID]; exists {
-			subEvents = append(subEvents, subEvent)
-		}
-	}
-
-	return subEvents, nil
-}
-
-// GetParents returns all direct parent events of the given event
-func (d *DAG) GetParents(eventID string) ([]*Event, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	event, exists := d.events[eventID]
-	if !exists {
-		return nil, fmt.Errorf("event %s not found", eventID)
-	}
-
-	parents := make([]*Event, 0, len(event.Parents))
-	for _, parentID := range event.Parents {
-		if parent, exists := d.events[parentID]; exists {
-			parents = append(parents, parent)
-		}
-	}
-
-	return parents, nil
-}
-
-// GetEvents returns all events in the DAG
-func (d *DAG) GetEvents() []*Event {
+// GetAllEvents returns all events in the DAG
+func (d *DAG) GetAllEvents() []*Event {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -182,21 +130,72 @@ func (d *DAG) GetEvents() []*Event {
 	for _, event := range d.events {
 		events = append(events, event)
 	}
-
 	return events
 }
 
-// GetEventsWithBeacon returns all events that reference a specific beacon round
-func (d *DAG) GetEventsWithBeacon(round uint64) []*Event {
+// VerifyEventChain verifies the integrity of an event and its ancestors
+func (d *DAG) VerifyEventChain(eventID string) error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	var events []*Event
-	for _, event := range d.events {
-		if event.BeaconRound == round {
-			events = append(events, event)
+	visited := make(map[string]bool)
+
+	var verify func(id string) error
+	verify = func(id string) error {
+		if visited[id] {
+			return nil
 		}
+
+		event, exists := d.events[id]
+		if !exists {
+			return fmt.Errorf("event %s not found", id)
+		}
+
+		// Verify parent relationships
+		for _, parentID := range event.Parents {
+			parent, exists := d.events[parentID]
+			if !exists {
+				return fmt.Errorf("parent event %s not found", parentID)
+			}
+
+			// Verify temporal ordering
+			if !parent.Timestamp.Before(event.Timestamp) {
+				return fmt.Errorf("invalid temporal ordering between %s and parent %s", id, parentID)
+			}
+
+			if err := verify(parentID); err != nil {
+				return err
+			}
+		}
+
+		// If this is a sub-event, verify relationship with parent event
+		if event.IsSubEvent {
+			parentEvent, exists := d.events[event.ParentEvent]
+			if !exists {
+				return fmt.Errorf("parent event %s not found", event.ParentEvent)
+			}
+
+			// Verify temporal ordering
+			if !parentEvent.Timestamp.Before(event.Timestamp) {
+				return fmt.Errorf("invalid temporal ordering between sub-event %s and parent %s", id, event.ParentEvent)
+			}
+
+			// Verify parent event has this sub-event in its list
+			found := false
+			for _, subEventID := range parentEvent.SubEvents {
+				if subEventID == id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("parent event %s does not reference sub-event %s", event.ParentEvent, id)
+			}
+		}
+
+		visited[id] = true
+		return nil
 	}
 
-	return events
+	return verify(eventID)
 }

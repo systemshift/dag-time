@@ -94,6 +94,7 @@ func main() {
 	defer ticker.Stop()
 
 	eventCount := 0
+	var lastEventID string // Track last event ID for parent references
 	log.Printf("Starting main loop")
 
 	for {
@@ -105,25 +106,45 @@ func main() {
 
 		case round := <-b.Rounds():
 			log.Printf("Received beacon round %d", round.Number)
+			// If we have a last event, anchor it to this beacon round
+			if lastEventID != "" {
+				if event, err := p.GetEvent(lastEventID); err == nil {
+					event.SetBeaconRound(round.Number, round.Randomness)
+					log.Printf("Anchored event %s to beacon round %d", lastEventID, round.Number)
+				}
+			}
 
 		case <-ticker.C:
 			eventCount++
-			event := &pool.PoolEvent{
-				ID:        fmt.Sprintf("event-%d", eventCount),
-				Data:      []byte(fmt.Sprintf("test event %d", eventCount)),
-				Timestamp: time.Now(),
-				Creator:   node.Host.ID().String(),
+			data := []byte(fmt.Sprintf("test event %d", eventCount))
+
+			var parents []string
+			if lastEventID != "" {
+				parents = []string{lastEventID}
 			}
 
-			if err := p.AddEvent(ctx, event); err != nil {
-				log.Printf("Failed to add event: %v", err)
-				continue
+			// Every 3rd event will be a sub-event of the last event
+			if eventCount > 1 && eventCount%3 == 0 && lastEventID != "" {
+				err = p.AddSubEvent(ctx, data, lastEventID, nil)
+				if err != nil {
+					log.Printf("Failed to add sub-event: %v", err)
+					continue
+				}
+			} else {
+				err = p.AddEvent(ctx, data, parents)
+				if err != nil {
+					log.Printf("Failed to add event: %v", err)
+					continue
+				}
 			}
 
-			log.Printf("Created event: %s", event.ID)
+			// Get all events and update lastEventID
+			events := p.GetEvents()
+			if len(events) > 0 {
+				lastEventID = events[len(events)-1].ID
+			}
 
 			// Log pool state
-			events := p.GetEvents()
 			peers := p.GetPeers()
 			log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
 
@@ -131,6 +152,15 @@ func main() {
 			log.Printf("Connected peers:")
 			for id := range peers {
 				log.Printf("  %s", id)
+			}
+
+			// Verify the event chain periodically
+			if eventCount%5 == 0 && lastEventID != "" {
+				if err := p.VerifyEvent(lastEventID); err != nil {
+					log.Printf("Event chain verification failed: %v", err)
+				} else {
+					log.Printf("Event chain verification successful")
+				}
 			}
 		}
 	}

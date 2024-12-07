@@ -11,21 +11,12 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/systemshift/dag-time/pkg/dag"
 )
 
 const (
 	TopicName = "dag-time-pool"
 )
-
-// PoolEvent represents an event in the temporary pool
-type PoolEvent struct {
-	ID        string    `json:"id"`
-	Data      []byte    `json:"data"`
-	Timestamp time.Time `json:"timestamp"`
-	Creator   string    `json:"creator"` // Peer ID of the creator
-	Parents   []string  `json:"parents"` // IDs of parent events
-	Proof     []byte    `json:"proof"`   // Proof of work
-}
 
 // Pool manages the temporary event pool
 type Pool struct {
@@ -34,11 +25,11 @@ type Pool struct {
 	pubsub *pubsub.PubSub
 	topic  *pubsub.Topic
 	sub    *pubsub.Subscription
-	events map[string]*PoolEvent // Map of event ID to event
-	peers  map[peer.ID]time.Time // Map of peer ID to last seen time
-	cancel context.CancelFunc    // Cancel function for the message handler
-	done   chan struct{}         // Channel to signal when message handler is done
-	closed bool                  // Flag to track if pool is closed
+	dag    *dag.DAG
+	peers  map[peer.ID]time.Time
+	cancel context.CancelFunc
+	done   chan struct{}
+	closed bool
 }
 
 // GetHost returns the libp2p host for testing purposes
@@ -80,7 +71,7 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 		pubsub: ps,
 		topic:  topic,
 		sub:    sub,
-		events: make(map[string]*PoolEvent),
+		dag:    dag.NewDAG(),
 		peers:  make(map[peer.ID]time.Time),
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -90,7 +81,32 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 	go pool.handleMessages(handlerCtx)
 	log.Printf("Started message handler")
 
+	// Start peer tracking
+	go pool.trackPeers(handlerCtx)
+
 	return pool, nil
+}
+
+// trackPeers periodically updates the peer list
+func (p *Pool) trackPeers(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			if !p.closed {
+				// Get all connected peers from the host
+				for _, peerID := range p.host.Network().Peers() {
+					p.peers[peerID] = time.Now()
+				}
+			}
+			p.mu.Unlock()
+		}
+	}
 }
 
 // handleMessages processes incoming messages from the pubsub
@@ -127,16 +143,19 @@ func (p *Pool) handleMessages(ctx context.Context) {
 			p.mu.Unlock()
 
 			// Decode event
-			var event PoolEvent
+			var event dag.Event
 			if err := json.Unmarshal(msg.Data, &event); err != nil {
 				log.Printf("Error decoding message: %v", err)
 				continue
 			}
 
-			// Add event to pool
+			// Add event to DAG
 			p.mu.Lock()
 			if !p.closed {
-				p.events[event.ID] = &event
+				if err := p.dag.AddEvent(&event); err != nil {
+					log.Printf("Error adding event to DAG: %v", err)
+					continue
+				}
 			}
 			p.mu.Unlock()
 
@@ -146,7 +165,7 @@ func (p *Pool) handleMessages(ctx context.Context) {
 }
 
 // AddEvent adds a new event to the pool and broadcasts it
-func (p *Pool) AddEvent(ctx context.Context, event *PoolEvent) error {
+func (p *Pool) AddEvent(ctx context.Context, data []byte, parents []string) error {
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
@@ -154,20 +173,24 @@ func (p *Pool) AddEvent(ctx context.Context, event *PoolEvent) error {
 	}
 	p.mu.RUnlock()
 
-	// Verify event has required fields
-	if event.ID == "" || event.Creator == "" {
-		return fmt.Errorf("event missing required fields")
+	// Create new event
+	event, err := dag.NewEvent(data, parents)
+	if err != nil {
+		return fmt.Errorf("creating event: %w", err)
 	}
 
-	log.Printf("Adding event %s from creator %s", event.ID, event.Creator)
+	log.Printf("Adding event %s", event.ID)
 
-	// Add event to local pool
+	// Add event to DAG
 	p.mu.Lock()
-	p.events[event.ID] = event
+	if err := p.dag.AddEvent(event); err != nil {
+		p.mu.Unlock()
+		return fmt.Errorf("adding event to DAG: %w", err)
+	}
 	p.mu.Unlock()
 
 	// Broadcast event
-	data, err := json.Marshal(event)
+	data, err = json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("encoding event: %w", err)
 	}
@@ -180,16 +203,57 @@ func (p *Pool) AddEvent(ctx context.Context, event *PoolEvent) error {
 	return nil
 }
 
+// AddSubEvent adds a new sub-event to the pool
+func (p *Pool) AddSubEvent(ctx context.Context, data []byte, parentEventID string, additionalParents []string) error {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("pool is closed")
+	}
+	p.mu.RUnlock()
+
+	// Create new sub-event
+	event, err := dag.NewSubEvent(data, parentEventID, additionalParents)
+	if err != nil {
+		return fmt.Errorf("creating sub-event: %w", err)
+	}
+
+	log.Printf("Adding sub-event %s with parent %s", event.ID, parentEventID)
+
+	// Add event to DAG
+	p.mu.Lock()
+	if err := p.dag.AddEvent(event); err != nil {
+		p.mu.Unlock()
+		return fmt.Errorf("adding sub-event to DAG: %w", err)
+	}
+	p.mu.Unlock()
+
+	// Broadcast event
+	data, err = json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encoding sub-event: %w", err)
+	}
+
+	if err := p.topic.Publish(ctx, data); err != nil {
+		return fmt.Errorf("publishing sub-event: %w", err)
+	}
+
+	log.Printf("Published sub-event %s to topic", event.ID)
+	return nil
+}
+
 // GetEvents returns all events in the pool
-func (p *Pool) GetEvents() []*PoolEvent {
+func (p *Pool) GetEvents() []*dag.Event {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.dag.GetAllEvents()
+}
 
-	events := make([]*PoolEvent, 0, len(p.events))
-	for _, event := range p.events {
-		events = append(events, event)
-	}
-	return events
+// GetEvent retrieves a specific event by ID
+func (p *Pool) GetEvent(id string) (*dag.Event, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.dag.GetEvent(id)
 }
 
 // GetPeers returns all known peers and their last seen time
@@ -202,6 +266,13 @@ func (p *Pool) GetPeers() map[peer.ID]time.Time {
 		peers[id] = lastSeen
 	}
 	return peers
+}
+
+// VerifyEvent verifies an event and its chain of ancestors
+func (p *Pool) VerifyEvent(eventID string) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.dag.VerifyEventChain(eventID)
 }
 
 // Close shuts down the pool

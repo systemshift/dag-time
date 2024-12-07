@@ -1,4 +1,4 @@
-package pool
+package pool_test
 
 import (
 	"context"
@@ -6,284 +6,232 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
-	pool "github.com/systemshift/dag-time/pkg/pool"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/systemshift/dag-time/pkg/dag"
+	"github.com/systemshift/dag-time/pkg/pool"
 )
 
-func setupTestHosts(t *testing.T) (host.Host, host.Host) {
-	// Create two hosts for testing
-	h1, err := libp2p.New()
-	if err != nil {
-		t.Fatalf("Failed to create host1: %v", err)
+func TestPool(t *testing.T) {
+	// Create libp2p hosts with TCP transport
+	h1, err := libp2p.New(
+		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"),
+	)
+	require.NoError(t, err)
+	defer h1.Close()
+
+	h2, err := libp2p.New(
+		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"),
+	)
+	require.NoError(t, err)
+	defer h2.Close()
+
+	// Create pools
+	ctx := context.Background()
+	p1, err := pool.NewPool(ctx, h1)
+	require.NoError(t, err)
+	defer p1.Close()
+
+	p2, err := pool.NewPool(ctx, h2)
+	require.NoError(t, err)
+	defer p2.Close()
+
+	// Get h2's multiaddr
+	h2Addr := h2.Addrs()[0]
+	h2Info := peer.AddrInfo{
+		ID:    h2.ID(),
+		Addrs: []multiaddr.Multiaddr{h2Addr},
 	}
 
-	h2, err := libp2p.New()
-	if err != nil {
-		t.Fatalf("Failed to create host2: %v", err)
-	}
+	// Connect h1 to h2
+	err = h1.Connect(ctx, h2Info)
+	require.NoError(t, err)
 
-	// Connect the hosts
-	h2info := host.InfoFromHost(h2)
-	if err := h1.Connect(context.Background(), *h2info); err != nil {
-		t.Fatalf("Failed to connect hosts: %v", err)
-	}
+	// Wait for connection to establish
+	time.Sleep(time.Second)
 
-	return h1, h2
-}
+	t.Run("Basic Event Creation and Propagation", func(t *testing.T) {
+		// Add event to first pool
+		data := []byte("test event")
+		err := p1.AddEvent(ctx, data, nil)
+		require.NoError(t, err)
 
-func waitForPeerConnection(t *testing.T, h1, h2 host.Host) {
-	// Wait for the connection to be established
-	for i := 0; i < 50; i++ { // Try for 5 seconds max
-		if h1.Network().Connectedness(h2.ID()) == network.Connected &&
-			h2.Network().Connectedness(h1.ID()) == network.Connected {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatal("Peers failed to connect within timeout")
-}
+		// Wait for propagation
+		time.Sleep(time.Second)
 
-func waitForEvent(t *testing.T, p *pool.Pool, eventID string, timeout time.Duration) {
-	// Wait for the event to appear in the pool
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		events := p.GetEvents()
+		// Check events in both pools
+		events1 := p1.GetEvents()
+		events2 := p2.GetEvents()
+
+		assert.Equal(t, 1, len(events1))
+		assert.Equal(t, 1, len(events2))
+		assert.Equal(t, events1[0].ID, events2[0].ID)
+		assert.Equal(t, data, events1[0].Data)
+	})
+
+	t.Run("Event Parent Relationships", func(t *testing.T) {
+		// Create first event
+		data1 := []byte("parent event")
+		err := p1.AddEvent(ctx, data1, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Get the parent event ID
+		events := p1.GetEvents()
+		var parentID string
 		for _, e := range events {
-			if e.ID == eventID {
-				return
+			if string(e.Data) == "parent event" {
+				parentID = e.ID
+				break
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatal("Event not received within timeout")
-}
+		require.NotEmpty(t, parentID)
 
-func waitForPubSubReady(t *testing.T, p1, p2 *pool.Pool) {
-	// Wait for pubsub to establish
-	deadline := time.Now().Add(10 * time.Second)
-	testEvent := &pool.PoolEvent{
-		ID:        "test-sync-event",
-		Data:      []byte("sync"),
-		Timestamp: time.Now(),
-		Creator:   p1.GetHost().ID().String(),
-	}
+		// Create child event with explicit parent reference
+		data2 := []byte("child event")
+		err = p1.AddEvent(ctx, data2, []string{parentID})
+		require.NoError(t, err)
 
-	for time.Now().Before(deadline) {
-		// Try to send a test event
-		if err := p1.AddEvent(context.Background(), testEvent); err != nil {
-			t.Logf("Failed to send test event: %v", err)
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
+		// Wait for propagation
+		time.Sleep(time.Second)
 
-		// Check if p2 received it
-		events := p2.GetEvents()
+		// Get the child event
+		events = p1.GetEvents()
+		var childEvent *dag.Event
 		for _, e := range events {
-			if e.ID == testEvent.ID {
-				return // PubSub is working
+			if string(e.Data) == "child event" {
+				childEvent = e
+				break
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Fatal("PubSub failed to establish within timeout")
-}
+		require.NotNil(t, childEvent)
 
-func TestNewPool(t *testing.T) {
-	ctx := context.Background()
-	h1, h2 := setupTestHosts(t)
-	defer h2.Close()
-	defer h1.Close()
+		// Verify parent relationship
+		assert.Contains(t, childEvent.Parents, parentID)
+	})
 
-	waitForPeerConnection(t, h1, h2)
+	t.Run("Sub-Event Creation and Relationships", func(t *testing.T) {
+		// Create parent event
+		parentData := []byte("parent event for sub-event")
+		err := p1.AddEvent(ctx, parentData, nil)
+		require.NoError(t, err)
 
-	// Create pools
-	p1, err := pool.NewPool(ctx, h1)
-	if err != nil {
-		t.Fatalf("Failed to create pool1: %v", err)
-	}
-	defer p1.Close()
+		// Wait for propagation
+		time.Sleep(time.Second)
 
-	p2, err := pool.NewPool(ctx, h2)
-	if err != nil {
-		t.Fatalf("Failed to create pool2: %v", err)
-	}
-	defer p2.Close()
-
-	// Wait for pubsub to establish
-	waitForPubSubReady(t, p1, p2)
-
-	// Verify pools are empty (excluding test sync event)
-	events1 := p1.GetEvents()
-	events2 := p2.GetEvents()
-	if len(events1) > 1 || len(events2) > 1 {
-		t.Error("Pools should only contain sync event")
-	}
-}
-
-func TestEventPropagation(t *testing.T) {
-	ctx := context.Background()
-	h1, h2 := setupTestHosts(t)
-	defer h2.Close()
-	defer h1.Close()
-
-	waitForPeerConnection(t, h1, h2)
-
-	// Create pools
-	p1, err := pool.NewPool(ctx, h1)
-	if err != nil {
-		t.Fatalf("Failed to create pool1: %v", err)
-	}
-	defer p1.Close()
-
-	p2, err := pool.NewPool(ctx, h2)
-	if err != nil {
-		t.Fatalf("Failed to create pool2: %v", err)
-	}
-	defer p2.Close()
-
-	// Wait for pubsub to establish
-	waitForPubSubReady(t, p1, p2)
-
-	// Create and add event to pool1
-	event := &pool.PoolEvent{
-		ID:        "test-propagation-event",
-		Data:      []byte("test data"),
-		Timestamp: time.Now(),
-		Creator:   h1.ID().String(),
-	}
-
-	if err := p1.AddEvent(ctx, event); err != nil {
-		t.Fatalf("Failed to add event: %v", err)
-	}
-
-	// Wait for event to propagate to pool2
-	waitForEvent(t, p2, event.ID, 5*time.Second)
-
-	// Verify event was received correctly
-	events := p2.GetEvents()
-	var found bool
-	for _, e := range events {
-		if e.ID == event.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("Event not found in pool2")
-	}
-}
-
-func TestPeerTracking(t *testing.T) {
-	ctx := context.Background()
-	h1, h2 := setupTestHosts(t)
-	defer h2.Close()
-	defer h1.Close()
-
-	waitForPeerConnection(t, h1, h2)
-
-	// Create pools
-	p1, err := pool.NewPool(ctx, h1)
-	if err != nil {
-		t.Fatalf("Failed to create pool1: %v", err)
-	}
-	defer p1.Close()
-
-	p2, err := pool.NewPool(ctx, h2)
-	if err != nil {
-		t.Fatalf("Failed to create pool2: %v", err)
-	}
-	defer p2.Close()
-
-	// Wait for pubsub to establish
-	waitForPubSubReady(t, p1, p2)
-
-	// Create and add event to pool2
-	event := &pool.PoolEvent{
-		ID:        "test-tracking-event",
-		Data:      []byte("test data"),
-		Timestamp: time.Now(),
-		Creator:   h2.ID().String(),
-	}
-
-	if err := p2.AddEvent(ctx, event); err != nil {
-		t.Fatalf("Failed to add event: %v", err)
-	}
-
-	// Wait for event to propagate
-	waitForEvent(t, p1, event.ID, 5*time.Second)
-
-	// Verify peer tracking in pool1
-	peers := p1.GetPeers()
-	if len(peers) != 1 {
-		t.Fatalf("Expected 1 peer, got %d", len(peers))
-	}
-
-	// Verify the peer is h2
-	found := false
-	for id := range peers {
-		if id == h2.ID() {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("Peer tracking failed to record correct peer")
-	}
-}
-
-func TestEventValidation(t *testing.T) {
-	ctx := context.Background()
-	h1, _ := setupTestHosts(t)
-	defer h1.Close()
-
-	p1, err := pool.NewPool(ctx, h1)
-	if err != nil {
-		t.Fatalf("Failed to create pool: %v", err)
-	}
-	defer p1.Close()
-
-	tests := []struct {
-		name    string
-		event   *pool.PoolEvent
-		wantErr bool
-	}{
-		{
-			name: "valid event",
-			event: &pool.PoolEvent{
-				ID:        "test-event",
-				Data:      []byte("test data"),
-				Timestamp: time.Now(),
-				Creator:   h1.ID().String(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing ID",
-			event: &pool.PoolEvent{
-				Data:      []byte("test data"),
-				Timestamp: time.Now(),
-				Creator:   h1.ID().String(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing creator",
-			event: &pool.PoolEvent{
-				ID:        "test-event",
-				Data:      []byte("test data"),
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := p1.AddEvent(ctx, tt.event)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("AddEvent() error = %v, wantErr %v", err, tt.wantErr)
+		// Get the parent event ID
+		events := p1.GetEvents()
+		var parentID string
+		for _, e := range events {
+			if string(e.Data) == "parent event for sub-event" {
+				parentID = e.ID
+				break
 			}
-		})
-	}
+		}
+		require.NotEmpty(t, parentID)
+
+		// Create sub-event
+		subEventData := []byte("sub event")
+		err = p1.AddSubEvent(ctx, subEventData, parentID, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Verify relationships
+		parentEvent, err := p1.GetEvent(parentID)
+		require.NoError(t, err)
+
+		// Find the sub-event
+		events = p1.GetEvents()
+		var subEvent *dag.Event
+		for _, e := range events {
+			if string(e.Data) == "sub event" {
+				subEvent = e
+				break
+			}
+		}
+		require.NotNil(t, subEvent)
+
+		assert.True(t, subEvent.IsSubEvent)
+		assert.Equal(t, parentID, subEvent.ParentEvent)
+		assert.Contains(t, parentEvent.SubEvents, subEvent.ID)
+	})
+
+	t.Run("Event Chain Verification", func(t *testing.T) {
+		// Create first event in chain
+		data1 := []byte("event 1")
+		err := p1.AddEvent(ctx, data1, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Get event1 ID
+		events := p1.GetEvents()
+		var event1ID string
+		for _, e := range events {
+			if string(e.Data) == "event 1" {
+				event1ID = e.ID
+				break
+			}
+		}
+		require.NotEmpty(t, event1ID)
+
+		// Create second event referencing first
+		data2 := []byte("event 2")
+		err = p1.AddEvent(ctx, data2, []string{event1ID})
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Get event2 ID
+		events = p1.GetEvents()
+		var event2ID string
+		for _, e := range events {
+			if string(e.Data) == "event 2" {
+				event2ID = e.ID
+				break
+			}
+		}
+		require.NotEmpty(t, event2ID)
+
+		// Create sub-event of event2
+		subEventData := []byte("sub event of event 2")
+		err = p1.AddSubEvent(ctx, subEventData, event2ID, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Get sub-event ID
+		events = p1.GetEvents()
+		var subEventID string
+		for _, e := range events {
+			if string(e.Data) == "sub event of event 2" {
+				subEventID = e.ID
+				break
+			}
+		}
+		require.NotEmpty(t, subEventID)
+
+		// Verify the entire chain
+		err = p1.VerifyEvent(subEventID)
+		assert.NoError(t, err)
+	})
+
+	t.Run("Peer Management", func(t *testing.T) {
+		peers1 := p1.GetPeers()
+		peers2 := p2.GetPeers()
+
+		assert.Equal(t, 1, len(peers1))
+		assert.Equal(t, 1, len(peers2))
+		assert.Contains(t, peers1, h2.ID())
+		assert.Contains(t, peers2, h1.ID())
+	})
 }

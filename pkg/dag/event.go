@@ -26,10 +26,15 @@ type Event struct {
 
 // NewEvent creates a new event with the given data and parents
 func NewEvent(data []byte, parents []string) (*Event, error) {
+	if parents == nil {
+		parents = make([]string, 0)
+	}
+
 	event := &Event{
 		Data:      data,
 		Parents:   parents,
 		Timestamp: time.Now(),
+		SubEvents: make([]string, 0),
 	}
 
 	// Calculate event ID
@@ -42,6 +47,10 @@ func NewEvent(data []byte, parents []string) (*Event, error) {
 
 // NewSubEvent creates a new sub-event connected to a parent event
 func NewSubEvent(data []byte, parentEventID string, additionalParents []string) (*Event, error) {
+	if additionalParents == nil {
+		additionalParents = make([]string, 0)
+	}
+
 	// Combine parent event ID with any additional parents
 	parents := append([]string{parentEventID}, additionalParents...)
 
@@ -51,6 +60,7 @@ func NewSubEvent(data []byte, parentEventID string, additionalParents []string) 
 		Timestamp:   time.Now(),
 		ParentEvent: parentEventID,
 		IsSubEvent:  true,
+		SubEvents:   make([]string, 0),
 	}
 
 	// Calculate event ID
