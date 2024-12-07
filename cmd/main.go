@@ -11,15 +11,16 @@ import (
 	"time"
 
 	"github.com/systemshift/dag-time/pkg/beacon"
-	"github.com/systemshift/dag-time/pkg/dag"
+	"github.com/systemshift/dag-time/pkg/network"
+	"github.com/systemshift/dag-time/pkg/pool"
 )
 
 var (
-	drandURL        = flag.String("drand-url", "https://api.drand.sh", "drand HTTP endpoint")
-	drandInterval   = flag.Duration("drand-interval", 10*time.Second, "How often to fetch drand beacon")
-	eventRate       = flag.Duration("event-rate", 100*time.Millisecond, "How often to generate events")
-	anchorInterval  = flag.Int("anchor-interval", 10, "How many events before anchoring to drand")
-	subEventComplex = flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events (0.0-1.0)")
+	listenPort    = flag.Int("port", 0, "Node listen port (0 for random)")
+	connectTo     = flag.String("peer", "", "Peer multiaddr to connect to")
+	drandURL      = flag.String("drand-url", "https://api.drand.sh", "drand HTTP endpoint")
+	drandInterval = flag.Duration("drand-interval", 10*time.Second, "How often to fetch drand beacon")
+	eventInterval = flag.Duration("event-interval", 5*time.Second, "How often to generate events")
 )
 
 func main() {
@@ -35,49 +36,70 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		log.Println("Received shutdown signal")
+		sig := <-sigChan
+		log.Printf("Received signal: %v", sig)
 		cancel()
 	}()
 
+	// Create p2p node
+	log.Printf("Creating node on port %d", *listenPort)
+	node, err := network.NewNode(ctx, *listenPort)
+	if err != nil {
+		log.Fatalf("Failed to create node: %v", err)
+	}
+	defer func() {
+		log.Printf("Closing node")
+		node.Close()
+	}()
+
+	// Connect to peer if specified
+	if *connectTo != "" {
+		log.Printf("Attempting to connect to peer: %s", *connectTo)
+		if err := node.Connect(ctx, *connectTo); err != nil {
+			log.Fatalf("Failed to connect to peer: %v", err)
+		}
+		log.Printf("Successfully connected to peer")
+	}
+
 	// Initialize drand beacon client
+	log.Printf("Initializing drand beacon client")
 	b, err := beacon.NewDrandBeacon(*drandURL)
 	if err != nil {
 		log.Fatalf("Failed to create beacon client: %v", err)
 	}
 
 	// Start beacon fetching
+	log.Printf("Starting beacon fetching")
 	if err := b.Start(ctx, *drandInterval); err != nil {
 		log.Fatalf("Failed to start beacon: %v", err)
 	}
-	defer b.Stop()
+	defer func() {
+		log.Printf("Stopping beacon")
+		b.Stop()
+	}()
 
-	// Create DAG
-	d := dag.New()
-
-	// Create initial root event
-	root, err := dag.NewEvent([]byte("root"), nil)
+	// Create event pool
+	log.Printf("Creating event pool")
+	p, err := pool.NewPool(ctx, node.Host)
 	if err != nil {
-		log.Fatalf("Failed to create root event: %v", err)
+		log.Fatalf("Failed to create pool: %v", err)
 	}
+	defer func() {
+		log.Printf("Closing pool")
+		p.Close()
+	}()
 
-	if err := d.AddEvent(root); err != nil {
-		log.Fatalf("Failed to add root event: %v", err)
-	}
-
-	log.Printf("Created root event: %s", root.ID)
-
-	// Track the latest event for parent references
-	latestEvent := root
-	eventCount := 0
-
-	// Main event generation loop
-	ticker := time.NewTicker(*eventRate)
+	// Start event generation
+	ticker := time.NewTicker(*eventInterval)
 	defer ticker.Stop()
+
+	eventCount := 0
+	log.Printf("Starting main loop")
 
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("Context cancelled")
 			log.Println("Shutting down...")
 			return
 
@@ -86,59 +108,30 @@ func main() {
 
 		case <-ticker.C:
 			eventCount++
-			var event *dag.Event
-			var err error
-
-			// Decide if this should be a regular event or sub-event
-			if eventCount > 1 && *subEventComplex > 0 && randFloat() < *subEventComplex {
-				// Create a sub-event
-				event, err = dag.NewSubEvent(
-					[]byte(fmt.Sprintf("sub-event-%d", eventCount)),
-					latestEvent.ID,
-					nil,
-				)
-			} else {
-				// Create a regular event
-				event, err = dag.NewEvent(
-					[]byte(fmt.Sprintf("event-%d", eventCount)),
-					[]string{latestEvent.ID},
-				)
+			event := &pool.PoolEvent{
+				ID:        fmt.Sprintf("event-%d", eventCount),
+				Data:      []byte(fmt.Sprintf("test event %d", eventCount)),
+				Timestamp: time.Now(),
+				Creator:   node.Host.ID().String(),
 			}
 
-			if err != nil {
-				log.Printf("Failed to create event: %v", err)
-				continue
-			}
-
-			// Every anchorInterval events, fetch latest round and anchor
-			if eventCount%*anchorInterval == 0 {
-				round, err := b.GetLatestRound(ctx)
-				if err != nil {
-					log.Printf("Failed to get latest round: %v", err)
-				} else {
-					event.SetBeaconRound(round.Number, round.Randomness)
-					log.Printf("Anchored event %s to beacon round %d", event.ID, round.Number)
-				}
-			}
-
-			if err := d.AddEvent(event); err != nil {
+			if err := p.AddEvent(ctx, event); err != nil {
 				log.Printf("Failed to add event: %v", err)
 				continue
 			}
 
-			latestEvent = event
-			log.Printf("Created %s: %s", eventTypeStr(event), event.ID)
+			log.Printf("Created event: %s", event.ID)
+
+			// Log pool state
+			events := p.GetEvents()
+			peers := p.GetPeers()
+			log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
+
+			// Log peer IDs
+			log.Printf("Connected peers:")
+			for id := range peers {
+				log.Printf("  %s", id)
+			}
 		}
 	}
-}
-
-func eventTypeStr(e *dag.Event) string {
-	if e.IsSubEvent {
-		return "sub-event"
-	}
-	return "event"
-}
-
-func randFloat() float64 {
-	return float64(time.Now().UnixNano()%1000) / 1000.0
 }
