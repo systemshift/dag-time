@@ -36,6 +36,9 @@ type Pool struct {
 	sub    *pubsub.Subscription
 	events map[string]*PoolEvent // Map of event ID to event
 	peers  map[peer.ID]time.Time // Map of peer ID to last seen time
+	cancel context.CancelFunc    // Cancel function for the message handler
+	done   chan struct{}         // Channel to signal when message handler is done
+	closed bool                  // Flag to track if pool is closed
 }
 
 // NewPool creates a new temporary event pool
@@ -59,9 +62,13 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 	// Subscribe to topic
 	sub, err := topic.Subscribe()
 	if err != nil {
+		topic.Close()
 		return nil, fmt.Errorf("subscribing to topic: %w", err)
 	}
 	log.Printf("Subscribed to topic")
+
+	// Create cancellable context for message handler
+	handlerCtx, cancel := context.WithCancel(ctx)
 
 	pool := &Pool{
 		host:   h,
@@ -70,10 +77,12 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 		sub:    sub,
 		events: make(map[string]*PoolEvent),
 		peers:  make(map[peer.ID]time.Time),
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 
 	// Start handling messages
-	go pool.handleMessages(ctx)
+	go pool.handleMessages(handlerCtx)
 	log.Printf("Started message handler")
 
 	return pool, nil
@@ -81,47 +90,65 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 
 // handleMessages processes incoming messages from the pubsub
 func (p *Pool) handleMessages(ctx context.Context) {
+	defer close(p.done)
 	log.Printf("Message handler started for host %s", p.host.ID())
+
 	for {
-		msg, err := p.sub.Next(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				log.Printf("Context cancelled, stopping message handler")
-				return // Context cancelled
+		select {
+		case <-ctx.Done():
+			log.Printf("Context cancelled, stopping message handler")
+			return
+		default:
+			msg, err := p.sub.Next(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("Error getting next message: %v", err)
+				continue
 			}
-			log.Printf("Error getting next message: %v", err)
-			continue
+
+			// Skip messages from ourselves
+			if msg.ReceivedFrom == p.host.ID() {
+				log.Printf("Skipping message from self")
+				continue
+			}
+
+			// Update peer last seen time
+			p.mu.Lock()
+			if !p.closed {
+				p.peers[msg.ReceivedFrom] = time.Now()
+			}
+			p.mu.Unlock()
+
+			// Decode event
+			var event PoolEvent
+			if err := json.Unmarshal(msg.Data, &event); err != nil {
+				log.Printf("Error decoding message: %v", err)
+				continue
+			}
+
+			// Add event to pool
+			p.mu.Lock()
+			if !p.closed {
+				p.events[event.ID] = &event
+			}
+			p.mu.Unlock()
+
+			log.Printf("Received event %s from peer %s", event.ID, msg.ReceivedFrom)
 		}
-
-		// Skip messages from ourselves
-		if msg.ReceivedFrom == p.host.ID() {
-			log.Printf("Skipping message from self")
-			continue
-		}
-
-		// Update peer last seen time
-		p.mu.Lock()
-		p.peers[msg.ReceivedFrom] = time.Now()
-		p.mu.Unlock()
-
-		// Decode event
-		var event PoolEvent
-		if err := json.Unmarshal(msg.Data, &event); err != nil {
-			log.Printf("Error decoding message: %v", err)
-			continue
-		}
-
-		// Add event to pool
-		p.mu.Lock()
-		p.events[event.ID] = &event
-		p.mu.Unlock()
-
-		log.Printf("Received event %s from peer %s", event.ID, msg.ReceivedFrom)
 	}
 }
 
 // AddEvent adds a new event to the pool and broadcasts it
 func (p *Pool) AddEvent(ctx context.Context, event *PoolEvent) error {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("pool is closed")
+	}
+	p.mu.RUnlock()
+
 	// Verify event has required fields
 	if event.ID == "" || event.Creator == "" {
 		return fmt.Errorf("event missing required fields")
@@ -174,7 +201,22 @@ func (p *Pool) GetPeers() map[peer.ID]time.Time {
 
 // Close shuts down the pool
 func (p *Pool) Close() error {
-	log.Printf("Closing pool")
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	p.mu.Unlock()
+
+	// Cancel message handler and wait for it to finish
+	p.cancel()
+	<-p.done
+
+	// Clean up in reverse order of creation
 	p.sub.Cancel()
-	return p.topic.Close()
+	if err := p.topic.Close(); err != nil {
+		return fmt.Errorf("closing topic: %w", err)
+	}
+	return nil
 }

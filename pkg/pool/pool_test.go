@@ -7,6 +7,7 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 )
 
 func setupTestHosts(t *testing.T) (host.Host, host.Host) {
@@ -30,11 +31,69 @@ func setupTestHosts(t *testing.T) (host.Host, host.Host) {
 	return h1, h2
 }
 
+func waitForPeerConnection(t *testing.T, h1, h2 host.Host) {
+	// Wait for the connection to be established
+	for i := 0; i < 50; i++ { // Try for 5 seconds max
+		if h1.Network().Connectedness(h2.ID()) == network.Connected &&
+			h2.Network().Connectedness(h1.ID()) == network.Connected {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("Peers failed to connect within timeout")
+}
+
+func waitForEvent(t *testing.T, p *Pool, eventID string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		events := p.GetEvents()
+		for _, e := range events {
+			if e.ID == eventID {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("Event not received within timeout")
+}
+
+func waitForPubSubReady(t *testing.T, p1, p2 *Pool) {
+	// Wait for pubsub to establish
+	deadline := time.Now().Add(10 * time.Second)
+	testEvent := &PoolEvent{
+		ID:        "test-sync-event",
+		Data:      []byte("sync"),
+		Timestamp: time.Now(),
+		Creator:   p1.host.ID().String(),
+	}
+
+	for time.Now().Before(deadline) {
+		// Try to send a test event
+		if err := p1.AddEvent(context.Background(), testEvent); err != nil {
+			t.Logf("Failed to send test event: %v", err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		// Check if p2 received it
+		events := p2.GetEvents()
+		for _, e := range events {
+			if e.ID == testEvent.ID {
+				return // PubSub is working
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatal("PubSub failed to establish within timeout")
+}
+
 func TestNewPool(t *testing.T) {
 	ctx := context.Background()
 	h1, h2 := setupTestHosts(t)
-	defer h1.Close()
 	defer h2.Close()
+	defer h1.Close()
+
+	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
 	p1, err := NewPool(ctx, h1)
@@ -49,20 +108,24 @@ func TestNewPool(t *testing.T) {
 	}
 	defer p2.Close()
 
-	// Verify pools are empty
-	if len(p1.GetEvents()) != 0 {
-		t.Error("New pool should be empty")
-	}
-	if len(p2.GetEvents()) != 0 {
-		t.Error("New pool should be empty")
+	// Wait for pubsub to establish
+	waitForPubSubReady(t, p1, p2)
+
+	// Verify pools are empty (excluding test sync event)
+	events1 := p1.GetEvents()
+	events2 := p2.GetEvents()
+	if len(events1) > 1 || len(events2) > 1 {
+		t.Error("Pools should only contain sync event")
 	}
 }
 
 func TestEventPropagation(t *testing.T) {
 	ctx := context.Background()
 	h1, h2 := setupTestHosts(t)
-	defer h1.Close()
 	defer h2.Close()
+	defer h1.Close()
+
+	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
 	p1, err := NewPool(ctx, h1)
@@ -77,12 +140,12 @@ func TestEventPropagation(t *testing.T) {
 	}
 	defer p2.Close()
 
-	// Give time for pubsub to establish
-	time.Sleep(time.Second)
+	// Wait for pubsub to establish
+	waitForPubSubReady(t, p1, p2)
 
 	// Create and add event to pool1
 	event := &PoolEvent{
-		ID:        "test-event",
+		ID:        "test-propagation-event",
 		Data:      []byte("test data"),
 		Timestamp: time.Now(),
 		Creator:   h1.ID().String(),
@@ -92,24 +155,30 @@ func TestEventPropagation(t *testing.T) {
 		t.Fatalf("Failed to add event: %v", err)
 	}
 
-	// Wait for event to propagate
-	time.Sleep(time.Second)
+	// Wait for event to propagate to pool2
+	waitForEvent(t, p2, event.ID, 5*time.Second)
 
-	// Verify event was received by pool2
+	// Verify event was received correctly
 	events := p2.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("Expected 1 event in pool2, got %d", len(events))
+	var found bool
+	for _, e := range events {
+		if e.ID == event.ID {
+			found = true
+			break
+		}
 	}
-	if events[0].ID != event.ID {
-		t.Error("Received wrong event")
+	if !found {
+		t.Error("Event not found in pool2")
 	}
 }
 
 func TestPeerTracking(t *testing.T) {
 	ctx := context.Background()
 	h1, h2 := setupTestHosts(t)
-	defer h1.Close()
 	defer h2.Close()
+	defer h1.Close()
+
+	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
 	p1, err := NewPool(ctx, h1)
@@ -124,12 +193,12 @@ func TestPeerTracking(t *testing.T) {
 	}
 	defer p2.Close()
 
-	// Give time for pubsub to establish
-	time.Sleep(time.Second)
+	// Wait for pubsub to establish
+	waitForPubSubReady(t, p1, p2)
 
 	// Create and add event to pool2
 	event := &PoolEvent{
-		ID:        "test-event",
+		ID:        "test-tracking-event",
 		Data:      []byte("test data"),
 		Timestamp: time.Now(),
 		Creator:   h2.ID().String(),
@@ -140,7 +209,7 @@ func TestPeerTracking(t *testing.T) {
 	}
 
 	// Wait for event to propagate
-	time.Sleep(time.Second)
+	waitForEvent(t, p1, event.ID, 5*time.Second)
 
 	// Verify peer tracking in pool1
 	peers := p1.GetPeers()
