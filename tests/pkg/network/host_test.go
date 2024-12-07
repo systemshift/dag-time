@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	network "github.com/systemshift/dag-time/pkg/network"
 )
 
 func TestNewNode(t *testing.T) {
@@ -28,7 +30,7 @@ func TestNewNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			node, err := NewNode(ctx, tt.port)
+			node, err := network.NewNode(ctx, tt.port)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewNode() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -71,13 +73,13 @@ func TestNodeConnection(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two nodes
-	node1, err := NewNode(ctx, 0)
+	node1, err := network.NewNode(ctx, 0)
 	if err != nil {
 		t.Fatalf("Failed to create node1: %v", err)
 	}
 	defer node1.Close()
 
-	node2, err := NewNode(ctx, 0)
+	node2, err := network.NewNode(ctx, 0)
 	if err != nil {
 		t.Fatalf("Failed to create node2: %v", err)
 	}
@@ -107,7 +109,7 @@ func TestInvalidPeerAddress(t *testing.T) {
 	ctx := context.Background()
 
 	// Create node
-	node, err := NewNode(ctx, 0)
+	node, err := network.NewNode(ctx, 0)
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
@@ -154,13 +156,13 @@ func TestPingService(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two nodes
-	node1, err := NewNode(ctx, 0)
+	node1, err := network.NewNode(ctx, 0)
 	if err != nil {
 		t.Fatalf("Failed to create node1: %v", err)
 	}
 	defer node1.Close()
 
-	node2, err := NewNode(ctx, 0)
+	node2, err := network.NewNode(ctx, 0)
 	if err != nil {
 		t.Fatalf("Failed to create node2: %v", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	beacon "github.com/systemshift/dag-time/pkg/beacon"
 )
 
 func TestNewDrandBeacon(t *testing.T) {
@@ -26,12 +28,12 @@ func TestNewDrandBeacon(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beacon, err := NewDrandBeacon(tt.endpoint)
+			b, err := beacon.NewDrandBeacon(tt.endpoint)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewDrandBeacon() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if beacon == nil {
+			if b == nil {
 				t.Error("NewDrandBeacon() returned nil beacon")
 			}
 		})
@@ -39,7 +41,7 @@ func TestNewDrandBeacon(t *testing.T) {
 }
 
 func TestDrandBeacon_GetLatestRound(t *testing.T) {
-	beacon, err := NewDrandBeacon("")
+	b, err := beacon.NewDrandBeacon("")
 	if err != nil {
 		t.Fatalf("Failed to create beacon: %v", err)
 	}
@@ -47,7 +49,7 @@ func TestDrandBeacon_GetLatestRound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	round, err := beacon.GetLatestRound(ctx)
+	round, err := b.GetLatestRound(ctx)
 	if err != nil {
 		t.Fatalf("GetLatestRound() error = %v", err)
 	}
@@ -74,7 +76,7 @@ func TestDrandBeacon_GetLatestRound(t *testing.T) {
 }
 
 func TestDrandBeacon_StartStop(t *testing.T) {
-	beacon, err := NewDrandBeacon("")
+	b, err := beacon.NewDrandBeacon("")
 	if err != nil {
 		t.Fatalf("Failed to create beacon: %v", err)
 	}
@@ -83,14 +85,14 @@ func TestDrandBeacon_StartStop(t *testing.T) {
 	defer cancel()
 
 	// Start the beacon with a short interval
-	err = beacon.Start(ctx, 1*time.Second)
+	err = b.Start(ctx, 1*time.Second)
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
 	// Wait for at least one round
 	select {
-	case round := <-beacon.Rounds():
+	case round := <-b.Rounds():
 		if round == nil {
 			t.Error("Received nil round")
 		}
@@ -99,14 +101,14 @@ func TestDrandBeacon_StartStop(t *testing.T) {
 	}
 
 	// Stop the beacon
-	err = beacon.Stop()
+	err = b.Stop()
 	if err != nil {
 		t.Errorf("Stop() error = %v", err)
 	}
 
 	// Verify no more rounds are received
 	select {
-	case round := <-beacon.Rounds():
+	case round := <-b.Rounds():
 		t.Errorf("Received unexpected round after stop: %v", round)
 	case <-time.After(1500 * time.Millisecond):
 		// Expected timeout

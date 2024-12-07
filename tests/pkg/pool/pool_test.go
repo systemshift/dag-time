@@ -8,6 +8,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	pool "github.com/systemshift/dag-time/pkg/pool"
 )
 
 func setupTestHosts(t *testing.T) (host.Host, host.Host) {
@@ -43,7 +44,8 @@ func waitForPeerConnection(t *testing.T, h1, h2 host.Host) {
 	t.Fatal("Peers failed to connect within timeout")
 }
 
-func waitForEvent(t *testing.T, p *Pool, eventID string, timeout time.Duration) {
+func waitForEvent(t *testing.T, p *pool.Pool, eventID string, timeout time.Duration) {
+	// Wait for the event to appear in the pool
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		events := p.GetEvents()
@@ -57,14 +59,14 @@ func waitForEvent(t *testing.T, p *Pool, eventID string, timeout time.Duration) 
 	t.Fatal("Event not received within timeout")
 }
 
-func waitForPubSubReady(t *testing.T, p1, p2 *Pool) {
+func waitForPubSubReady(t *testing.T, p1, p2 *pool.Pool) {
 	// Wait for pubsub to establish
 	deadline := time.Now().Add(10 * time.Second)
-	testEvent := &PoolEvent{
+	testEvent := &pool.PoolEvent{
 		ID:        "test-sync-event",
 		Data:      []byte("sync"),
 		Timestamp: time.Now(),
-		Creator:   p1.host.ID().String(),
+		Creator:   p1.GetHost().ID().String(),
 	}
 
 	for time.Now().Before(deadline) {
@@ -96,13 +98,13 @@ func TestNewPool(t *testing.T) {
 	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
-	p1, err := NewPool(ctx, h1)
+	p1, err := pool.NewPool(ctx, h1)
 	if err != nil {
 		t.Fatalf("Failed to create pool1: %v", err)
 	}
 	defer p1.Close()
 
-	p2, err := NewPool(ctx, h2)
+	p2, err := pool.NewPool(ctx, h2)
 	if err != nil {
 		t.Fatalf("Failed to create pool2: %v", err)
 	}
@@ -128,13 +130,13 @@ func TestEventPropagation(t *testing.T) {
 	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
-	p1, err := NewPool(ctx, h1)
+	p1, err := pool.NewPool(ctx, h1)
 	if err != nil {
 		t.Fatalf("Failed to create pool1: %v", err)
 	}
 	defer p1.Close()
 
-	p2, err := NewPool(ctx, h2)
+	p2, err := pool.NewPool(ctx, h2)
 	if err != nil {
 		t.Fatalf("Failed to create pool2: %v", err)
 	}
@@ -144,7 +146,7 @@ func TestEventPropagation(t *testing.T) {
 	waitForPubSubReady(t, p1, p2)
 
 	// Create and add event to pool1
-	event := &PoolEvent{
+	event := &pool.PoolEvent{
 		ID:        "test-propagation-event",
 		Data:      []byte("test data"),
 		Timestamp: time.Now(),
@@ -181,13 +183,13 @@ func TestPeerTracking(t *testing.T) {
 	waitForPeerConnection(t, h1, h2)
 
 	// Create pools
-	p1, err := NewPool(ctx, h1)
+	p1, err := pool.NewPool(ctx, h1)
 	if err != nil {
 		t.Fatalf("Failed to create pool1: %v", err)
 	}
 	defer p1.Close()
 
-	p2, err := NewPool(ctx, h2)
+	p2, err := pool.NewPool(ctx, h2)
 	if err != nil {
 		t.Fatalf("Failed to create pool2: %v", err)
 	}
@@ -197,7 +199,7 @@ func TestPeerTracking(t *testing.T) {
 	waitForPubSubReady(t, p1, p2)
 
 	// Create and add event to pool2
-	event := &PoolEvent{
+	event := &pool.PoolEvent{
 		ID:        "test-tracking-event",
 		Data:      []byte("test data"),
 		Timestamp: time.Now(),
@@ -235,7 +237,7 @@ func TestEventValidation(t *testing.T) {
 	h1, _ := setupTestHosts(t)
 	defer h1.Close()
 
-	p1, err := NewPool(ctx, h1)
+	p1, err := pool.NewPool(ctx, h1)
 	if err != nil {
 		t.Fatalf("Failed to create pool: %v", err)
 	}
@@ -243,12 +245,12 @@ func TestEventValidation(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		event   *PoolEvent
+		event   *pool.PoolEvent
 		wantErr bool
 	}{
 		{
 			name: "valid event",
-			event: &PoolEvent{
+			event: &pool.PoolEvent{
 				ID:        "test-event",
 				Data:      []byte("test data"),
 				Timestamp: time.Now(),
@@ -258,7 +260,7 @@ func TestEventValidation(t *testing.T) {
 		},
 		{
 			name: "missing ID",
-			event: &PoolEvent{
+			event: &pool.PoolEvent{
 				Data:      []byte("test data"),
 				Timestamp: time.Now(),
 				Creator:   h1.ID().String(),
@@ -267,7 +269,7 @@ func TestEventValidation(t *testing.T) {
 		},
 		{
 			name: "missing creator",
-			event: &PoolEvent{
+			event: &pool.PoolEvent{
 				ID:        "test-event",
 				Data:      []byte("test data"),
 				Timestamp: time.Now(),

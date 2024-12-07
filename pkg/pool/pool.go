@@ -41,6 +41,11 @@ type Pool struct {
 	closed bool                  // Flag to track if pool is closed
 }
 
+// GetHost returns the libp2p host for testing purposes
+func (p *Pool) GetHost() host.Host {
+	return p.host
+}
+
 // NewPool creates a new temporary event pool
 func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 	log.Printf("Creating new pool with host ID: %s", h.ID())
@@ -96,7 +101,7 @@ func (p *Pool) handleMessages(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Context cancelled, stopping message handler")
+			log.Printf("Context cancelled stopping message handler")
 			return
 		default:
 			msg, err := p.sub.Next(ctx)
