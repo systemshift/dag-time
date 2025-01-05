@@ -61,48 +61,73 @@ func (d *DAG) AddEvent(event *Event) error {
 
 // detectCycle checks if adding the new event would create a cycle
 func (d *DAG) detectCycle(newEvent *Event) error {
-	visited := make(map[string]bool)
-	path := make(map[string]bool)
-
-	var visit func(eventID string, isSubEventPath bool) error
-	visit = func(eventID string, isSubEventPath bool) error {
-		if path[eventID] {
-			return fmt.Errorf("cycle detected at event %s", eventID)
-		}
-		if visited[eventID] {
-			return nil
+	// Helper function to check if eventB is reachable from eventA through parent relationships
+	var isReachable func(eventA, eventB string, visited map[string]bool, checkSubEvents bool) bool
+	isReachable = func(eventA, eventB string, visited map[string]bool, checkSubEvents bool) bool {
+		if eventA == eventB {
+			return true
 		}
 
-		visited[eventID] = true
-		path[eventID] = true
+		if visited[eventA] {
+			return false
+		}
+		visited[eventA] = true
 
-		event := d.events[eventID]
-		if event != nil {
-			// Check parent relationships
-			for _, parentID := range event.Parents {
-				if err := visit(parentID, false); err != nil {
-					return err
-				}
-			}
+		event := d.events[eventA]
+		if event == nil {
+			return false
+		}
 
-			// Only follow sub-event relationships if we're not already on a sub-event path
-			if !isSubEventPath {
-				for _, subEventID := range event.SubEvents {
-					if err := visit(subEventID, true); err != nil {
-						return err
-					}
-				}
+		// Follow regular parent relationships
+		for _, parentID := range event.Parents {
+			if isReachable(parentID, eventB, visited, checkSubEvents) {
+				return true
 			}
 		}
 
-		path[eventID] = false
-		return nil
+		// Only check sub-event relationships if requested
+		if checkSubEvents && event.IsSubEvent {
+			if isReachable(event.ParentEvent, eventB, visited, true) {
+				return true
+			}
+		}
+
+		return false
 	}
 
-	// Check paths from new event's parents
-	for _, parentID := range newEvent.Parents {
-		if err := visit(parentID, newEvent.IsSubEvent); err != nil {
-			return err
+	// Add the new event temporarily to check for cycles
+	tempEvent := *newEvent
+	d.events[tempEvent.ID] = &tempEvent
+	defer delete(d.events, tempEvent.ID)
+
+	if tempEvent.IsSubEvent {
+		// For sub-events, only check cycles through the parent event
+		visited := make(map[string]bool)
+		if isReachable(tempEvent.ParentEvent, tempEvent.ID, visited, false) {
+			return fmt.Errorf("cycle detected through parent event %s", tempEvent.ParentEvent)
+		}
+	} else {
+		// For regular events, check for cycles through parent relationships
+		for _, parent1 := range tempEvent.Parents {
+			// Check if this parent can reach any other parent
+			for _, parent2 := range tempEvent.Parents {
+				if parent1 == parent2 {
+					continue
+				}
+				visited := make(map[string]bool)
+				if isReachable(parent1, parent2, visited, false) {
+					return fmt.Errorf("cycle detected: parent %s can reach parent %s", parent1, parent2)
+				}
+			}
+
+			// Check if this parent can reach the new event through other paths
+			visited := make(map[string]bool)
+			delete(d.events, tempEvent.ID) // Temporarily remove the event to check existing paths
+			if isReachable(parent1, tempEvent.ID, visited, false) {
+				d.events[tempEvent.ID] = &tempEvent // Restore the event
+				return fmt.Errorf("cycle detected: parent %s can reach event through existing path", parent1)
+			}
+			d.events[tempEvent.ID] = &tempEvent // Restore the event
 		}
 	}
 
