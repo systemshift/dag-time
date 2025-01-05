@@ -7,7 +7,7 @@ import (
 )
 
 func TestDAG_AddEvent(t *testing.T) {
-	d := dag.New()
+	d := dag.NewDAG()
 
 	// Create and add a root event
 	root, err := dag.NewEvent([]byte("root"), nil)
@@ -30,8 +30,9 @@ func TestDAG_AddEvent(t *testing.T) {
 	}
 
 	// Verify events were added
-	if len(d.GetEvents()) != 2 {
-		t.Errorf("Expected 2 events, got %d", len(d.GetEvents()))
+	events := d.GetAllEvents()
+	if len(events) != 2 {
+		t.Errorf("Expected 2 events, got %d", len(events))
 	}
 
 	// Try to add duplicate event
@@ -51,7 +52,7 @@ func TestDAG_AddEvent(t *testing.T) {
 }
 
 func TestDAG_SubEvents(t *testing.T) {
-	d := dag.New()
+	d := dag.NewDAG()
 
 	// Create parent event
 	parent, err := dag.NewEvent([]byte("parent"), nil)
@@ -74,17 +75,17 @@ func TestDAG_SubEvents(t *testing.T) {
 	}
 
 	// Verify sub-event relationship
-	subEvents, err := d.GetSubEvents(parent.ID)
+	parentEvent, err := d.GetEvent(parent.ID)
 	if err != nil {
-		t.Fatalf("Failed to get sub-events: %v", err)
+		t.Fatalf("Failed to get parent event: %v", err)
 	}
 
-	if len(subEvents) != 1 {
-		t.Errorf("Expected 1 sub-event, got %d", len(subEvents))
+	if len(parentEvent.SubEvents) != 1 {
+		t.Errorf("Expected 1 sub-event, got %d", len(parentEvent.SubEvents))
 	}
 
-	if subEvents[0].ID != subEvent.ID {
-		t.Errorf("Expected sub-event ID %s, got %s", subEvent.ID, subEvents[0].ID)
+	if parentEvent.SubEvents[0] != subEvent.ID {
+		t.Errorf("Expected sub-event ID %s, got %s", subEvent.ID, parentEvent.SubEvents[0])
 	}
 
 	// Create another sub-event with additional parent
@@ -98,18 +99,18 @@ func TestDAG_SubEvents(t *testing.T) {
 	}
 
 	// Verify both sub-events are present
-	subEvents, err = d.GetSubEvents(parent.ID)
+	parentEvent, err = d.GetEvent(parent.ID)
 	if err != nil {
-		t.Fatalf("Failed to get sub-events: %v", err)
+		t.Fatalf("Failed to get parent event: %v", err)
 	}
 
-	if len(subEvents) != 2 {
-		t.Errorf("Expected 2 sub-events, got %d", len(subEvents))
+	if len(parentEvent.SubEvents) != 2 {
+		t.Errorf("Expected 2 sub-events, got %d", len(parentEvent.SubEvents))
 	}
 }
 
 func TestDAG_CycleDetection(t *testing.T) {
-	d := dag.New()
+	d := dag.NewDAG()
 
 	// Create events
 	event1, _ := dag.NewEvent([]byte("event1"), nil)
@@ -135,7 +136,7 @@ func TestDAG_CycleDetection(t *testing.T) {
 }
 
 func TestDAG_BeaconReference(t *testing.T) {
-	d := dag.New()
+	d := dag.NewDAG()
 
 	// Create event with beacon reference
 	event, err := dag.NewEvent([]byte("event"), nil)
@@ -150,19 +151,26 @@ func TestDAG_BeaconReference(t *testing.T) {
 		t.Fatalf("Failed to add event: %v", err)
 	}
 
-	// Get events with beacon round
-	events := d.GetEventsWithBeacon(123)
-	if len(events) != 1 {
-		t.Errorf("Expected 1 event with beacon round 123, got %d", len(events))
+	// Get all events and filter by beacon round
+	events := d.GetAllEvents()
+	var eventsWithBeacon []*dag.Event
+	for _, e := range events {
+		if e.BeaconRound == 123 {
+			eventsWithBeacon = append(eventsWithBeacon, e)
+		}
 	}
 
-	if events[0].BeaconRound != 123 {
-		t.Errorf("Expected beacon round 123, got %d", events[0].BeaconRound)
+	if len(eventsWithBeacon) != 1 {
+		t.Errorf("Expected 1 event with beacon round 123, got %d", len(eventsWithBeacon))
+	}
+
+	if eventsWithBeacon[0].BeaconRound != 123 {
+		t.Errorf("Expected beacon round 123, got %d", eventsWithBeacon[0].BeaconRound)
 	}
 }
 
 func TestDAG_GetParents(t *testing.T) {
-	d := dag.New()
+	d := dag.NewDAG()
 
 	// Create events
 	parent1, _ := dag.NewEvent([]byte("parent1"), nil)
@@ -180,20 +188,20 @@ func TestDAG_GetParents(t *testing.T) {
 		t.Fatalf("Failed to add child: %v", err)
 	}
 
-	// Get parents
-	parents, err := d.GetParents(child.ID)
+	// Get child event and verify its parents
+	childEvent, err := d.GetEvent(child.ID)
 	if err != nil {
-		t.Fatalf("Failed to get parents: %v", err)
+		t.Fatalf("Failed to get child event: %v", err)
 	}
 
-	if len(parents) != 2 {
-		t.Errorf("Expected 2 parents, got %d", len(parents))
+	if len(childEvent.Parents) != 2 {
+		t.Errorf("Expected 2 parents, got %d", len(childEvent.Parents))
 	}
 
 	// Verify parent IDs
 	parentIDs := make(map[string]bool)
-	for _, parent := range parents {
-		parentIDs[parent.ID] = true
+	for _, parentID := range childEvent.Parents {
+		parentIDs[parentID] = true
 	}
 
 	if !parentIDs[parent1.ID] || !parentIDs[parent2.ID] {

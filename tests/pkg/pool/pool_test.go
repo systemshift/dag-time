@@ -162,6 +162,100 @@ func TestPool(t *testing.T) {
 		assert.Contains(t, parentEvent.SubEvents, subEvent.ID)
 	})
 
+	t.Run("Complex Sub-Event Relationships", func(t *testing.T) {
+		// Create two parent events
+		parent1Data := []byte("parent event 1")
+		err := p1.AddEvent(ctx, parent1Data, nil)
+		require.NoError(t, err)
+
+		parent2Data := []byte("parent event 2")
+		err = p1.AddEvent(ctx, parent2Data, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Get parent event IDs
+		events := p1.GetEvents()
+		var parent1ID, parent2ID string
+		for _, e := range events {
+			if string(e.Data) == "parent event 1" {
+				parent1ID = e.ID
+			}
+			if string(e.Data) == "parent event 2" {
+				parent2ID = e.ID
+			}
+		}
+		require.NotEmpty(t, parent1ID)
+		require.NotEmpty(t, parent2ID)
+
+		// Create sub-events for both parents
+		subEvent1Data := []byte("sub event 1")
+		err = p1.AddSubEvent(ctx, subEvent1Data, parent1ID, nil)
+		require.NoError(t, err)
+
+		subEvent2Data := []byte("sub event 2")
+		err = p1.AddSubEvent(ctx, subEvent2Data, parent2ID, nil)
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Find sub-event IDs
+		events = p1.GetEvents()
+		var subEvent1ID, subEvent2ID string
+		for _, e := range events {
+			if string(e.Data) == "sub event 1" {
+				subEvent1ID = e.ID
+			}
+			if string(e.Data) == "sub event 2" {
+				subEvent2ID = e.ID
+			}
+		}
+		require.NotEmpty(t, subEvent1ID)
+		require.NotEmpty(t, subEvent2ID)
+
+		// Create a sub-event that connects to both previous sub-events
+		crossConnectData := []byte("cross connected sub-event")
+		err = p1.AddSubEvent(ctx, crossConnectData, parent1ID, []string{subEvent2ID})
+		require.NoError(t, err)
+
+		// Wait for propagation
+		time.Sleep(time.Second)
+
+		// Find the cross-connected event
+		events = p1.GetEvents()
+		var crossEvent *dag.Event
+		for _, e := range events {
+			if string(e.Data) == "cross connected sub-event" {
+				crossEvent = e
+				break
+			}
+		}
+		require.NotNil(t, crossEvent)
+
+		// Verify relationships
+		assert.True(t, crossEvent.IsSubEvent)
+		assert.Equal(t, parent1ID, crossEvent.ParentEvent)
+		assert.Contains(t, crossEvent.Parents, subEvent2ID)
+
+		// Verify the entire structure
+		err = p1.VerifyEvent(crossEvent.ID)
+		assert.NoError(t, err)
+
+		// Verify propagation to second pool
+		events2 := p2.GetEvents()
+		var crossEventInPool2 *dag.Event
+		for _, e := range events2 {
+			if string(e.Data) == "cross connected sub-event" {
+				crossEventInPool2 = e
+				break
+			}
+		}
+		require.NotNil(t, crossEventInPool2)
+		assert.Equal(t, crossEvent.ID, crossEventInPool2.ID)
+	})
+
 	t.Run("Event Chain Verification", func(t *testing.T) {
 		// Create first event in chain
 		data1 := []byte("event 1")
