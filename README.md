@@ -81,17 +81,38 @@ The demo will:
 - Create sub-events with complex interconnections.
 - Construct a multi-level DAG of events and anchor it to the drand beacon at chosen intervals.
 
-**Configuration Options** (via flags/env vars):
-- `--drand-url`: The URL of the drand HTTP endpoint (defaults to https://api.drand.sh).
-- `--drand-interval`: How often to fetch a new drand beacon (in seconds).
-- `--event-rate`: How quickly local events are generated (in milliseconds).
-- `--anchor-interval`: How often a local event references the global drand beacon.
-- `--subevent-complexity`: Controls the likelihood and density of sub-event creation and cross-connections.
+**Configuration Options**:
+
+Network Settings:
+- `--port`: Node listen port (0 for random)
+- `--peer`: Peer multiaddr to connect to (optional)
+
+Beacon Settings:
+- `--drand-url`: The URL of the drand HTTP endpoint (defaults to https://api.drand.sh)
+- `--drand-interval`: How often to fetch a new drand beacon (minimum 1s, default 10s)
+
+Event Generation Settings:
+- `--event-rate`: How quickly to generate events (minimum 1ms, default 5s)
+- `--anchor-interval`: Number of events before anchoring to drand beacon (minimum 1, default 5)
+- `--subevent-complexity`: Probability of creating sub-events (0.0-1.0, default 0.3)
+- `--verify-interval`: How often to verify event chain integrity (in number of events, minimum 1, default 5)
 
 Example:
 ```bash
-./dag-time --drand-interval=10 --event-rate=5 --anchor-interval=100 --subevent-complexity=0.7
+./dag-time \
+  --event-rate=100ms \
+  --anchor-interval=10 \
+  --subevent-complexity=0.7 \
+  --verify-interval=20 \
+  --drand-interval=5s
 ```
+
+The above example will:
+- Generate events every 100ms
+- Anchor every 10th event to the drand beacon
+- Create sub-events with 70% probability
+- Verify the event chain every 20 events
+- Fetch new drand beacons every 5 seconds
 
 2. **Inspecting Outputs**:
    - The console output will log:

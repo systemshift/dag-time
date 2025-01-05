@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,18 +16,71 @@ import (
 	"github.com/systemshift/dag-time/pkg/pool"
 )
 
-var (
-	listenPort    = flag.Int("port", 0, "Node listen port (0 for random)")
-	connectTo     = flag.String("peer", "", "Peer multiaddr to connect to")
-	drandURL      = flag.String("drand-url", "https://api.drand.sh", "drand HTTP endpoint")
-	drandInterval = flag.Duration("drand-interval", 10*time.Second, "How often to fetch drand beacon")
-	eventInterval = flag.Duration("event-interval", 5*time.Second, "How often to generate events")
-)
+type config struct {
+	// Network settings
+	listenPort int
+	connectTo  string
+
+	// Beacon settings
+	drandURL      string
+	drandInterval time.Duration
+
+	// Event generation settings
+	eventRate          time.Duration
+	anchorInterval     int
+	subEventComplexity float64
+	verifyInterval     int
+}
+
+func parseFlags() (*config, error) {
+	cfg := &config{}
+
+	// Network flags
+	flag.IntVar(&cfg.listenPort, "port", 0, "Node listen port (0 for random)")
+	flag.StringVar(&cfg.connectTo, "peer", "", "Peer multiaddr to connect to")
+
+	// Beacon flags
+	flag.StringVar(&cfg.drandURL, "drand-url", "https://api.drand.sh", "drand HTTP endpoint")
+	flag.DurationVar(&cfg.drandInterval, "drand-interval", 10*time.Second, "How often to fetch drand beacon")
+
+	// Event generation flags
+	flag.DurationVar(&cfg.eventRate, "event-rate", 5*time.Second, "How quickly to generate events")
+	flag.IntVar(&cfg.anchorInterval, "anchor-interval", 5, "How many events before anchoring to drand beacon")
+	flag.Float64Var(&cfg.subEventComplexity, "subevent-complexity", 0.3, "Probability of creating sub-events (0.0-1.0)")
+	flag.IntVar(&cfg.verifyInterval, "verify-interval", 5, "How often to verify event chain (in number of events)")
+
+	flag.Parse()
+
+	// Validate configuration
+	if cfg.subEventComplexity < 0 || cfg.subEventComplexity > 1 {
+		return nil, fmt.Errorf("subevent-complexity must be between 0.0 and 1.0")
+	}
+	if cfg.anchorInterval < 1 {
+		return nil, fmt.Errorf("anchor-interval must be greater than 0")
+	}
+	if cfg.verifyInterval < 1 {
+		return nil, fmt.Errorf("verify-interval must be greater than 0")
+	}
+	if cfg.eventRate < time.Millisecond {
+		return nil, fmt.Errorf("event-rate must be at least 1ms")
+	}
+	if cfg.drandInterval < time.Second {
+		return nil, fmt.Errorf("drand-interval must be at least 1s")
+	}
+
+	return cfg, nil
+}
 
 func main() {
-	flag.Parse()
+	// Configure logging
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Println("DAG-Time: Starting...")
+
+	// Parse and validate configuration
+	cfg, err := parseFlags()
+	if err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
 
 	// Create context that can be cancelled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,8 +96,8 @@ func main() {
 	}()
 
 	// Create p2p node
-	log.Printf("Creating node on port %d", *listenPort)
-	node, err := network.NewNode(ctx, *listenPort)
+	log.Printf("Creating node on port %d", cfg.listenPort)
+	node, err := network.NewNode(ctx, cfg.listenPort)
 	if err != nil {
 		log.Fatalf("Failed to create node: %v", err)
 	}
@@ -53,9 +107,9 @@ func main() {
 	}()
 
 	// Connect to peer if specified
-	if *connectTo != "" {
-		log.Printf("Attempting to connect to peer: %s", *connectTo)
-		if err := node.Connect(ctx, *connectTo); err != nil {
+	if cfg.connectTo != "" {
+		log.Printf("Attempting to connect to peer: %s", cfg.connectTo)
+		if err := node.Connect(ctx, cfg.connectTo); err != nil {
 			log.Fatalf("Failed to connect to peer: %v", err)
 		}
 		log.Printf("Successfully connected to peer")
@@ -63,14 +117,14 @@ func main() {
 
 	// Initialize drand beacon client
 	log.Printf("Initializing drand beacon client")
-	b, err := beacon.NewDrandBeacon(*drandURL)
+	b, err := beacon.NewDrandBeacon(cfg.drandURL)
 	if err != nil {
 		log.Fatalf("Failed to create beacon client: %v", err)
 	}
 
 	// Start beacon fetching
 	log.Printf("Starting beacon fetching")
-	if err := b.Start(ctx, *drandInterval); err != nil {
+	if err := b.Start(ctx, cfg.drandInterval); err != nil {
 		log.Fatalf("Failed to start beacon: %v", err)
 	}
 	defer func() {
@@ -90,12 +144,18 @@ func main() {
 	}()
 
 	// Start event generation
-	ticker := time.NewTicker(*eventInterval)
+	ticker := time.NewTicker(cfg.eventRate)
 	defer ticker.Stop()
 
 	eventCount := 0
 	var lastEventID string // Track last event ID for parent references
-	log.Printf("Starting main loop")
+	log.Printf("Starting main loop with settings:")
+	log.Printf("  Event rate: %v", cfg.eventRate)
+	log.Printf("  Anchor interval: %d events", cfg.anchorInterval)
+	log.Printf("  Sub-event complexity: %.2f", cfg.subEventComplexity)
+	log.Printf("  Verify interval: %d events", cfg.verifyInterval)
+
+	// Initialize random source (not needed for rand/v2 as it's automatically seeded)
 
 	for {
 		select {
@@ -106,8 +166,8 @@ func main() {
 
 		case round := <-b.Rounds():
 			log.Printf("Received beacon round %d", round.Number)
-			// If we have a last event, anchor it to this beacon round
-			if lastEventID != "" {
+			// Anchor to beacon based on anchor interval
+			if lastEventID != "" && eventCount%cfg.anchorInterval == 0 {
 				if event, err := p.GetEvent(lastEventID); err == nil {
 					event.SetBeaconRound(round.Number, round.Randomness)
 					log.Printf("Anchored event %s to beacon round %d", lastEventID, round.Number)
@@ -123,19 +183,21 @@ func main() {
 				parents = []string{lastEventID}
 			}
 
-			// Every 3rd event will be a sub-event of the last event
-			if eventCount > 1 && eventCount%3 == 0 && lastEventID != "" {
+			// Create sub-event based on complexity setting
+			if eventCount > 1 && lastEventID != "" && rand.Float64() < float64(cfg.subEventComplexity) {
 				err = p.AddSubEvent(ctx, data, lastEventID, nil)
 				if err != nil {
 					log.Printf("Failed to add sub-event: %v", err)
 					continue
 				}
+				log.Printf("Added sub-event with parent %s", lastEventID)
 			} else {
 				err = p.AddEvent(ctx, data, parents)
 				if err != nil {
 					log.Printf("Failed to add event: %v", err)
 					continue
 				}
+				log.Printf("Added regular event")
 			}
 
 			// Get all events and update lastEventID
@@ -148,14 +210,16 @@ func main() {
 			peers := p.GetPeers()
 			log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
 
-			// Log peer IDs
-			log.Printf("Connected peers:")
-			for id := range peers {
-				log.Printf("  %s", id)
+			// Log peer IDs at a lower frequency to reduce noise
+			if eventCount%10 == 0 {
+				log.Printf("Connected peers:")
+				for id := range peers {
+					log.Printf("  %s", id)
+				}
 			}
 
 			// Verify the event chain periodically
-			if eventCount%5 == 0 && lastEventID != "" {
+			if eventCount%cfg.verifyInterval == 0 && lastEventID != "" {
 				if err := p.VerifyEvent(lastEventID); err != nil {
 					log.Printf("Event chain verification failed: %v", err)
 				} else {

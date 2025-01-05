@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -203,22 +204,105 @@ func (p *Pool) AddEvent(ctx context.Context, data []byte, parents []string) erro
 	return nil
 }
 
-// AddSubEvent adds a new sub-event to the pool
+// findRecentSubEvents finds sub-events within a given time window
+func (p *Pool) findRecentSubEvents(timeWindow time.Duration) []*dag.Event {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	cutoff := time.Now().Add(-timeWindow)
+	var recentSubEvents []*dag.Event
+
+	events := p.dag.GetAllEvents()
+	for _, event := range events {
+		if event.IsSubEvent && event.Timestamp.After(cutoff) {
+			recentSubEvents = append(recentSubEvents, event)
+		}
+	}
+
+	return recentSubEvents
+}
+
+// AddSubEvent adds a new sub-event to the pool with optional connections to other sub-events
 func (p *Pool) AddSubEvent(ctx context.Context, data []byte, parentEventID string, additionalParents []string) error {
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
 		return fmt.Errorf("pool is closed")
 	}
+
+	// Find recent sub-events that could be potential parents
+	recentSubEvents := p.findRecentSubEvents(30 * time.Second) // Look for sub-events in last 30 seconds
 	p.mu.RUnlock()
 
-	// Create new sub-event
+	// Randomly select some recent sub-events as additional parents
+	if len(recentSubEvents) > 0 && (additionalParents == nil || len(additionalParents) == 0) {
+		maxAdditional := 2 // Maximum number of additional connections
+		if len(recentSubEvents) < maxAdditional {
+			maxAdditional = len(recentSubEvents)
+		}
+
+		// Randomly select up to maxAdditional sub-events that won't create cycles
+		additionalParents = make([]string, 0, maxAdditional)
+		indices := make([]int, len(recentSubEvents))
+		for i := range indices {
+			indices[i] = i
+		}
+		rand.Shuffle(len(indices), func(i, j int) {
+			indices[i], indices[j] = indices[j], indices[i]
+		})
+
+		// Try each shuffled index until we have enough valid parents
+		for _, idx := range indices {
+			if len(additionalParents) >= maxAdditional {
+				break
+			}
+
+			subEvent := recentSubEvents[idx]
+			// Skip if this is the parent event itself
+			if subEvent.ID == parentEventID {
+				continue
+			}
+
+			// Skip if this sub-event is a descendant of our parent event
+			visited := make(map[string]bool)
+			var checkAncestors func(eventID string) bool
+			checkAncestors = func(eventID string) bool {
+				if visited[eventID] {
+					return false
+				}
+				visited[eventID] = true
+
+				event, err := p.GetEvent(eventID)
+				if err != nil {
+					return false
+				}
+
+				if event.ID == parentEventID {
+					return true
+				}
+
+				for _, parentID := range event.Parents {
+					if checkAncestors(parentID) {
+						return true
+					}
+				}
+				return false
+			}
+
+			if !checkAncestors(subEvent.ID) {
+				additionalParents = append(additionalParents, subEvent.ID)
+			}
+		}
+	}
+
+	// Create new sub-event with the combined parents
 	event, err := dag.NewSubEvent(data, parentEventID, additionalParents)
 	if err != nil {
 		return fmt.Errorf("creating sub-event: %w", err)
 	}
 
-	log.Printf("Adding sub-event %s with parent %s", event.ID, parentEventID)
+	log.Printf("Adding sub-event %s with parent %s and %d additional connections",
+		event.ID, parentEventID, len(additionalParents))
 
 	// Add event to DAG
 	p.mu.Lock()
