@@ -2,8 +2,11 @@ package pool_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
+
+	"strings"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -13,6 +16,36 @@ import (
 	"github.com/systemshift/dag-time/pkg/dag"
 	"github.com/systemshift/dag-time/pkg/pool"
 )
+
+// waitForEvents waits for a pool to have at least count events
+func waitForEvents(p *pool.Pool, count int) error {
+	timeout := time.After(10 * time.Second)
+	start := time.Now()
+	for {
+		select {
+		case <-timeout:
+			events := p.GetEvents()
+			return fmt.Errorf("timeout after %v waiting for %d events, got %d events: %v",
+				time.Since(start), count, len(events),
+				formatEvents(events))
+		default:
+			events := p.GetEvents()
+			if len(events) >= count {
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// formatEvents returns a string representation of events for debugging
+func formatEvents(events []*dag.Event) string {
+	var result []string
+	for _, e := range events {
+		result = append(result, fmt.Sprintf("{ID: %s, Data: %q}", e.ID, e.Data))
+	}
+	return fmt.Sprintf("[%s]", strings.Join(result, ", "))
+}
 
 func TestPool(t *testing.T) {
 	// Create libp2p hosts with TCP transport
@@ -49,8 +82,32 @@ func TestPool(t *testing.T) {
 	err = h1.Connect(ctx, h2Info)
 	require.NoError(t, err)
 
-	// Wait for connection to establish
-	time.Sleep(time.Second)
+	// Create context with longer timeout for pubsub setup
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Wait for connection and pubsub to establish
+	connected := make(chan struct{})
+	go func() {
+		for {
+			// Check both network connection and pubsub peers
+			if len(h1.Network().Peers()) > 0 && len(p1.GetPeers()) > 0 {
+				// Wait a bit more for pubsub to fully establish
+				time.Sleep(time.Second)
+				close(connected)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("Timeout waiting for connection")
+	case <-connected:
+		t.Logf("Connection established - Network peers: %d, PubSub peers: %d",
+			len(h1.Network().Peers()), len(p1.GetPeers()))
+	}
 
 	t.Run("Basic Event Creation and Propagation", func(t *testing.T) {
 		// Add event to first pool
@@ -58,8 +115,7 @@ func TestPool(t *testing.T) {
 		err := p1.AddEvent(ctx, data, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, 1))
 
 		// Check events in both pools
 		events1 := p1.GetEvents()
@@ -77,8 +133,7 @@ func TestPool(t *testing.T) {
 		err := p1.AddEvent(ctx, data1, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get the parent event ID
 		events := p1.GetEvents()
@@ -96,8 +151,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddEvent(ctx, data2, []string{parentID})
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get the child event
 		events = p1.GetEvents()
@@ -120,8 +174,7 @@ func TestPool(t *testing.T) {
 		err := p1.AddEvent(ctx, parentData, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get the parent event ID
 		events := p1.GetEvents()
@@ -139,8 +192,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddSubEvent(ctx, subEventData, parentID, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Verify relationships
 		parentEvent, err := p1.GetEvent(parentID)
@@ -172,8 +224,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddEvent(ctx, parent2Data, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get parent event IDs
 		events := p1.GetEvents()
@@ -198,8 +249,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddSubEvent(ctx, subEvent2Data, parent2ID, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Find sub-event IDs
 		events = p1.GetEvents()
@@ -220,8 +270,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddSubEvent(ctx, crossConnectData, parent1ID, []string{subEvent2ID})
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Find the cross-connected event
 		events = p1.GetEvents()
@@ -262,8 +311,7 @@ func TestPool(t *testing.T) {
 		err := p1.AddEvent(ctx, data1, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get event1 ID
 		events := p1.GetEvents()
@@ -281,8 +329,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddEvent(ctx, data2, []string{event1ID})
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get event2 ID
 		events = p1.GetEvents()
@@ -300,8 +347,7 @@ func TestPool(t *testing.T) {
 		err = p1.AddSubEvent(ctx, subEventData, event2ID, nil)
 		require.NoError(t, err)
 
-		// Wait for propagation
-		time.Sleep(time.Second)
+		require.NoError(t, waitForEvents(p2, len(p1.GetEvents())))
 
 		// Get sub-event ID
 		events = p1.GetEvents()

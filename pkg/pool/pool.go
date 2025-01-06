@@ -222,6 +222,73 @@ func (p *Pool) findRecentSubEvents(timeWindow time.Duration) []*dag.Event {
 	return recentSubEvents
 }
 
+// selectAdditionalParents randomly selects valid additional parents from recent sub-events
+func (p *Pool) selectAdditionalParents(recentSubEvents []*dag.Event, parentEventID string, maxAdditional int) []string {
+	if len(recentSubEvents) == 0 {
+		return nil
+	}
+
+	if maxAdditional > len(recentSubEvents) {
+		maxAdditional = len(recentSubEvents)
+	}
+
+	// Create shuffled indices
+	indices := make([]int, len(recentSubEvents))
+	for i := range indices {
+		indices[i] = i
+	}
+	rand.Shuffle(len(indices), func(i, j int) {
+		indices[i], indices[j] = indices[j], indices[i]
+	})
+
+	// Select valid parents
+	additionalParents := make([]string, 0, maxAdditional)
+	for _, idx := range indices {
+		if len(additionalParents) >= maxAdditional {
+			break
+		}
+
+		subEvent := recentSubEvents[idx]
+		if subEvent.ID == parentEventID || p.isDescendantOf(subEvent.ID, parentEventID) {
+			continue
+		}
+
+		additionalParents = append(additionalParents, subEvent.ID)
+	}
+
+	return additionalParents
+}
+
+// isDescendantOf checks if eventID is a descendant of ancestorID
+func (p *Pool) isDescendantOf(eventID, ancestorID string) bool {
+	visited := make(map[string]bool)
+	var checkAncestors func(string) bool
+	checkAncestors = func(id string) bool {
+		if visited[id] {
+			return false
+		}
+		visited[id] = true
+
+		event, err := p.GetEvent(id)
+		if err != nil {
+			return false
+		}
+
+		if event.ID == ancestorID {
+			return true
+		}
+
+		for _, parentID := range event.Parents {
+			if checkAncestors(parentID) {
+				return true
+			}
+		}
+		return false
+	}
+
+	return checkAncestors(eventID)
+}
+
 // AddSubEvent adds a new sub-event to the pool with optional connections to other sub-events
 func (p *Pool) AddSubEvent(ctx context.Context, data []byte, parentEventID string, additionalParents []string) error {
 	p.mu.RLock()
@@ -231,71 +298,15 @@ func (p *Pool) AddSubEvent(ctx context.Context, data []byte, parentEventID strin
 	}
 
 	// Find recent sub-events that could be potential parents
-	recentSubEvents := p.findRecentSubEvents(30 * time.Second) // Look for sub-events in last 30 seconds
+	recentSubEvents := p.findRecentSubEvents(30 * time.Second)
 	p.mu.RUnlock()
 
-	// Randomly select some recent sub-events as additional parents
-	if len(recentSubEvents) > 0 && (additionalParents == nil || len(additionalParents) == 0) {
-		maxAdditional := 2 // Maximum number of additional connections
-		if len(recentSubEvents) < maxAdditional {
-			maxAdditional = len(recentSubEvents)
-		}
-
-		// Randomly select up to maxAdditional sub-events that won't create cycles
-		additionalParents = make([]string, 0, maxAdditional)
-		indices := make([]int, len(recentSubEvents))
-		for i := range indices {
-			indices[i] = i
-		}
-		rand.Shuffle(len(indices), func(i, j int) {
-			indices[i], indices[j] = indices[j], indices[i]
-		})
-
-		// Try each shuffled index until we have enough valid parents
-		for _, idx := range indices {
-			if len(additionalParents) >= maxAdditional {
-				break
-			}
-
-			subEvent := recentSubEvents[idx]
-			// Skip if this is the parent event itself
-			if subEvent.ID == parentEventID {
-				continue
-			}
-
-			// Skip if this sub-event is a descendant of our parent event
-			visited := make(map[string]bool)
-			var checkAncestors func(eventID string) bool
-			checkAncestors = func(eventID string) bool {
-				if visited[eventID] {
-					return false
-				}
-				visited[eventID] = true
-
-				event, err := p.GetEvent(eventID)
-				if err != nil {
-					return false
-				}
-
-				if event.ID == parentEventID {
-					return true
-				}
-
-				for _, parentID := range event.Parents {
-					if checkAncestors(parentID) {
-						return true
-					}
-				}
-				return false
-			}
-
-			if !checkAncestors(subEvent.ID) {
-				additionalParents = append(additionalParents, subEvent.ID)
-			}
-		}
+	// Select additional parents if none provided
+	if len(additionalParents) == 0 {
+		additionalParents = p.selectAdditionalParents(recentSubEvents, parentEventID, 2)
 	}
 
-	// Create new sub-event with the combined parents
+	// Create and add the sub-event
 	event, err := dag.NewSubEvent(data, parentEventID, additionalParents)
 	if err != nil {
 		return fmt.Errorf("creating sub-event: %w", err)
