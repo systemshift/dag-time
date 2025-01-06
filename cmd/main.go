@@ -70,6 +70,115 @@ func parseFlags() (*config, error) {
 	return cfg, nil
 }
 
+// setupNode creates and configures the network and DAG-Time nodes
+func setupNode(ctx context.Context, cfg *config) (*network.Node, *dagtime.Node, error) {
+	// Create p2p node
+	log.Printf("Creating node on port %d", cfg.listenPort)
+	netNode, err := network.NewNode(ctx, cfg.listenPort)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating network node: %w", err)
+	}
+
+	// Connect to peer if specified
+	if cfg.connectTo != "" {
+		log.Printf("Attempting to connect to peer: %s", cfg.connectTo)
+		if err := netNode.Connect(ctx, cfg.connectTo); err != nil {
+			netNode.Close()
+			return nil, nil, fmt.Errorf("connecting to peer: %w", err)
+		}
+		log.Printf("Successfully connected to peer")
+	}
+
+	// Create DAG-Time node
+	log.Printf("Creating DAG-Time node")
+	node, err := dagtime.NewNode(ctx, netNode.Host, cfg.drandURL)
+	if err != nil {
+		netNode.Close()
+		return nil, nil, fmt.Errorf("creating DAG-Time node: %w", err)
+	}
+
+	// Start beacon fetching
+	log.Printf("Starting beacon fetching")
+	if err := node.Beacon.Start(ctx, cfg.drandInterval); err != nil {
+		node.Close()
+		netNode.Close()
+		return nil, nil, fmt.Errorf("starting beacon: %w", err)
+	}
+
+	return netNode, node, nil
+}
+
+// beaconRound represents a drand beacon round
+type beaconRound struct {
+	Number     uint64
+	Randomness []byte
+}
+
+// handleBeaconRound processes a new beacon round
+func handleBeaconRound(node *dagtime.Node, round *beaconRound, eventCount int, lastEventID string, anchorInterval int) {
+	log.Printf("Received beacon round %d", round.Number)
+	if lastEventID != "" && eventCount%anchorInterval == 0 {
+		if event, err := node.Pool.GetEvent(lastEventID); err == nil {
+			event.SetBeaconRound(round.Number, round.Randomness)
+			log.Printf("Anchored event %s to beacon round %d", lastEventID, round.Number)
+		}
+	}
+}
+
+// generateEvent creates a new event or sub-event
+func generateEvent(ctx context.Context, node *dagtime.Node, eventCount int, lastEventID string, subEventComplexity float64) error {
+	data := []byte(fmt.Sprintf("test event %d", eventCount))
+	var parents []string
+	if lastEventID != "" {
+		parents = []string{lastEventID}
+	}
+
+	if eventCount > 1 && lastEventID != "" && rand.Float64() < subEventComplexity {
+		if err := node.Pool.AddSubEvent(ctx, data, lastEventID, nil); err != nil {
+			return fmt.Errorf("adding sub-event: %w", err)
+		}
+		log.Printf("Added sub-event with parent %s", lastEventID)
+	} else {
+		if err := node.Pool.AddEvent(ctx, data, parents); err != nil {
+			return fmt.Errorf("adding event: %w", err)
+		}
+		log.Printf("Added regular event")
+	}
+	return nil
+}
+
+// logPoolState logs the current state of the event pool
+func logPoolState(node *dagtime.Node, eventCount int) string {
+	events := node.Pool.GetEvents()
+	peers := node.Pool.GetPeers()
+	log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
+
+	// Log peer IDs at a lower frequency
+	if eventCount%10 == 0 {
+		log.Printf("Connected peers:")
+		for id := range peers {
+			log.Printf("  %s", id)
+		}
+	}
+
+	// Return last event ID
+	if len(events) > 0 {
+		return events[len(events)-1].ID
+	}
+	return ""
+}
+
+// verifyEventChain performs periodic verification of the event chain
+func verifyEventChain(node *dagtime.Node, eventCount int, lastEventID string, verifyInterval int) {
+	if eventCount%verifyInterval == 0 && lastEventID != "" {
+		if err := node.Pool.VerifyEvent(lastEventID); err != nil {
+			log.Printf("Event chain verification failed: %v", err)
+		} else {
+			log.Printf("Event chain verification successful")
+		}
+	}
+}
+
 func main() {
 	// Configure logging
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -94,29 +203,10 @@ func main() {
 		cancel()
 	}()
 
-	// Create p2p node and connect to network
-	log.Printf("Creating node on port %d", cfg.listenPort)
-	netNode, err := network.NewNode(ctx, cfg.listenPort)
+	// Set up nodes
+	netNode, node, err := setupNode(ctx, cfg)
 	if err != nil {
-		log.Fatalf("Failed to create network node: %v", err)
-	}
-
-	// Connect to peer if specified
-	if cfg.connectTo != "" {
-		log.Printf("Attempting to connect to peer: %s", cfg.connectTo)
-		if err := netNode.Connect(ctx, cfg.connectTo); err != nil {
-			netNode.Close()
-			log.Fatalf("Failed to connect to peer: %v", err)
-		}
-		log.Printf("Successfully connected to peer")
-	}
-
-	// Create DAG-Time node
-	log.Printf("Creating DAG-Time node")
-	node, err := dagtime.NewNode(ctx, netNode.Host, cfg.drandURL)
-	if err != nil {
-		netNode.Close()
-		log.Fatalf("Failed to create DAG-Time node: %v", err)
+		log.Fatalf("Setup failed: %v", err)
 	}
 	defer func() {
 		log.Printf("Closing nodes")
@@ -124,25 +214,17 @@ func main() {
 		netNode.Close()
 	}()
 
-	// Start beacon fetching
-	log.Printf("Starting beacon fetching")
-	if err := node.Beacon.Start(ctx, cfg.drandInterval); err != nil {
-		log.Fatalf("Failed to start beacon: %v", err)
-	}
-
 	// Start event generation
 	ticker := time.NewTicker(cfg.eventRate)
 	defer ticker.Stop()
 
 	eventCount := 0
-	var lastEventID string // Track last event ID for parent references
+	var lastEventID string
 	log.Printf("Starting main loop with settings:")
 	log.Printf("  Event rate: %v", cfg.eventRate)
 	log.Printf("  Anchor interval: %d events", cfg.anchorInterval)
 	log.Printf("  Sub-event complexity: %.2f", cfg.subEventComplexity)
 	log.Printf("  Verify interval: %d events", cfg.verifyInterval)
-
-	// Initialize random source (not needed for rand/v2 as it's automatically seeded)
 
 	for {
 		select {
@@ -152,67 +234,22 @@ func main() {
 			return
 
 		case round := <-node.Beacon.Rounds():
-			log.Printf("Received beacon round %d", round.Number)
-			// Anchor to beacon based on anchor interval
-			if lastEventID != "" && eventCount%cfg.anchorInterval == 0 {
-				if event, err := node.Pool.GetEvent(lastEventID); err == nil {
-					event.SetBeaconRound(round.Number, round.Randomness)
-					log.Printf("Anchored event %s to beacon round %d", lastEventID, round.Number)
-				}
+			// Convert beacon round to local type
+			localRound := &beaconRound{
+				Number:     round.Number,
+				Randomness: round.Randomness,
 			}
+			handleBeaconRound(node, localRound, eventCount, lastEventID, cfg.anchorInterval)
 
 		case <-ticker.C:
 			eventCount++
-			data := []byte(fmt.Sprintf("test event %d", eventCount))
-
-			var parents []string
-			if lastEventID != "" {
-				parents = []string{lastEventID}
+			if err := generateEvent(ctx, node, eventCount, lastEventID, cfg.subEventComplexity); err != nil {
+				log.Printf("Failed to generate event: %v", err)
+				continue
 			}
 
-			// Create sub-event based on complexity setting
-			if eventCount > 1 && lastEventID != "" && rand.Float64() < float64(cfg.subEventComplexity) {
-				err = node.Pool.AddSubEvent(ctx, data, lastEventID, nil)
-				if err != nil {
-					log.Printf("Failed to add sub-event: %v", err)
-					continue
-				}
-				log.Printf("Added sub-event with parent %s", lastEventID)
-			} else {
-				err = node.Pool.AddEvent(ctx, data, parents)
-				if err != nil {
-					log.Printf("Failed to add event: %v", err)
-					continue
-				}
-				log.Printf("Added regular event")
-			}
-
-			// Get all events and update lastEventID
-			events := node.Pool.GetEvents()
-			if len(events) > 0 {
-				lastEventID = events[len(events)-1].ID
-			}
-
-			// Log pool state
-			peers := node.Pool.GetPeers()
-			log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
-
-			// Log peer IDs at a lower frequency to reduce noise
-			if eventCount%10 == 0 {
-				log.Printf("Connected peers:")
-				for id := range peers {
-					log.Printf("  %s", id)
-				}
-			}
-
-			// Verify the event chain periodically
-			if eventCount%cfg.verifyInterval == 0 && lastEventID != "" {
-				if err := node.Pool.VerifyEvent(lastEventID); err != nil {
-					log.Printf("Event chain verification failed: %v", err)
-				} else {
-					log.Printf("Event chain verification successful")
-				}
-			}
+			lastEventID = logPoolState(node, eventCount)
+			verifyEventChain(node, eventCount, lastEventID, cfg.verifyInterval)
 		}
 	}
 }
