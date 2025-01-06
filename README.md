@@ -1,9 +1,117 @@
 # DAG-Time: Integrating a Global Clock with Local Event Streams
 
-
 ## Overview
 
 DAG-Time is a trusted time source—powered by drand—with a local Directed Acyclic Graph (DAG) of events. The goal is to provide a verifiable timeline for fast-evolving local event streams while periodically anchoring them to a well-known global clock for trust and auditability.
+
+## Installation
+
+### As a Library
+
+To use DAG-Time in your Go project:
+
+```bash
+go get github.com/systemshift/dag-time
+```
+
+Then import the packages you need:
+
+```go
+import (
+    "github.com/systemshift/dag-time/pkg/dag"
+    "github.com/systemshift/dag-time/pkg/pool"
+    "github.com/systemshift/dag-time/pkg/beacon"
+)
+```
+
+### As a CLI Tool
+
+To install the DAG-Time command-line tool:
+
+```bash
+go install github.com/systemshift/dag-time/cmd@latest
+```
+
+## Library Usage
+
+The core functionality is available through several packages:
+
+```go
+// High-level interface
+import "github.com/systemshift/dag-time/pkg/dagtime"
+
+// Create a complete node
+node, err := dagtime.NewNode(ctx, host, "https://api.drand.sh")
+if err != nil {
+    log.Fatal(err)
+}
+defer node.Close()
+
+// Use the node's components
+err = node.Pool.AddEvent(ctx, data, parents)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Low-level interface
+import (
+    "github.com/systemshift/dag-time/pkg/dag"
+    "github.com/systemshift/dag-time/pkg/pool"
+    "github.com/systemshift/dag-time/pkg/beacon"
+)
+
+// Create components individually
+dag := dag.NewDAG()
+pool, err := pool.NewPool(ctx, host)
+if err != nil {
+    log.Fatal(err)
+}
+defer pool.Close()
+
+beacon, err := beacon.NewDrandBeacon("https://api.drand.sh")
+if err != nil {
+    log.Fatal(err)
+}
+defer beacon.Stop()
+
+// Use components directly
+err = pool.AddEvent(ctx, data, parents)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## CLI Usage
+
+Once installed, you can run the DAG-Time node with various configuration options:
+
+```bash
+dag-time [options]
+```
+
+Network Settings:
+- `--port`: Node listen port (0 for random)
+- `--peer`: Peer multiaddr to connect to (optional)
+
+Beacon Settings:
+- `--drand-url`: The URL of the drand HTTP endpoint (defaults to https://api.drand.sh)
+- `--drand-interval`: How often to fetch a new drand beacon (minimum 1s, default 10s)
+
+Event Generation Settings:
+- `--event-rate`: How quickly to generate events (minimum 1ms, default 5s)
+- `--anchor-interval`: Number of events before anchoring to drand beacon (minimum 1, default 5)
+- `--subevent-complexity`: Probability of creating sub-events (0.0-1.0, default 0.3)
+- `--verify-interval`: How often to verify event chain integrity (in number of events, minimum 1, default 5)
+
+Example:
+```bash
+dag-time \
+  --event-rate=100ms \
+  --anchor-interval=10 \
+  --subevent-complexity=0.7 \
+  --verify-interval=20 \
+  --drand-interval=5s
+```
 
 ## What Problem Does This Solve?
 
@@ -49,81 +157,6 @@ This creates a rich fabric of interconnected events while maintaining temporal c
 
 2. **drand Client**:  
    The demo uses drand's public test beacon. No additional setup is required if you rely on their public endpoints. If you want to run your own drand network, refer to drand's documentation.
-
-## Installation
-
-1. **Clone the Repository**:
-   ```bash
-   git clone https://github.com/systemshift/dag-time.git
-   cd dag-time
-   ```
-
-2. **Build the Project**:
-   ```bash
-   go build -o dag-time cmd/main.go
-   ```
-
-3. **(Optional) Running Tests**:
-   ```bash
-   go test ./...
-   ```
-
-## Usage
-
-1. **Start the Demo**:
-   ```bash
-   ./dag-time
-   ```
-
-The demo will:
-- Fetch the latest drand randomness periodically.
-- Generate a sequence of synthetic local events at a faster rate.
-- Create sub-events with complex interconnections.
-- Construct a multi-level DAG of events and anchor it to the drand beacon at chosen intervals.
-
-**Configuration Options**:
-
-Network Settings:
-- `--port`: Node listen port (0 for random)
-- `--peer`: Peer multiaddr to connect to (optional)
-
-Beacon Settings:
-- `--drand-url`: The URL of the drand HTTP endpoint (defaults to https://api.drand.sh)
-- `--drand-interval`: How often to fetch a new drand beacon (minimum 1s, default 10s)
-
-Event Generation Settings:
-- `--event-rate`: How quickly to generate events (minimum 1ms, default 5s)
-- `--anchor-interval`: Number of events before anchoring to drand beacon (minimum 1, default 5)
-- `--subevent-complexity`: Probability of creating sub-events (0.0-1.0, default 0.3)
-- `--verify-interval`: How often to verify event chain integrity (in number of events, minimum 1, default 5)
-
-Example:
-```bash
-./dag-time \
-  --event-rate=100ms \
-  --anchor-interval=10 \
-  --subevent-complexity=0.7 \
-  --verify-interval=20 \
-  --drand-interval=5s
-```
-
-The above example will:
-- Generate events every 100ms
-- Anchor every 10th event to the drand beacon
-- Create sub-events with 70% probability
-- Verify the event chain every 20 events
-- Fetch new drand beacons every 5 seconds
-
-2. **Inspecting Outputs**:
-   - The console output will log:
-     - Newly fetched drand beacons (round number, randomness, signature).
-     - Newly created local DAG events and their sub-events (with their hashes).
-     - Cross-connections between sub-events.
-     - Events that anchor to the global beacon.
-   - In a more advanced setup, you could:
-     - Print out a serialized DAG (e.g., in JSON) for inspection.
-     - Visualize the complex event relationships using graph visualization tools.
-     - Store DAG nodes in IPFS or a local database.
 
 ## Example Workflow
 

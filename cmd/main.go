@@ -11,9 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/systemshift/dag-time/pkg/beacon"
+	"github.com/systemshift/dag-time/pkg/dagtime"
 	"github.com/systemshift/dag-time/pkg/network"
-	"github.com/systemshift/dag-time/pkg/pool"
 )
 
 type config struct {
@@ -95,53 +94,41 @@ func main() {
 		cancel()
 	}()
 
-	// Create p2p node
+	// Create p2p node and connect to network
 	log.Printf("Creating node on port %d", cfg.listenPort)
-	node, err := network.NewNode(ctx, cfg.listenPort)
+	netNode, err := network.NewNode(ctx, cfg.listenPort)
 	if err != nil {
-		log.Fatalf("Failed to create node: %v", err)
+		log.Fatalf("Failed to create network node: %v", err)
 	}
-	defer func() {
-		log.Printf("Closing node")
-		node.Close()
-	}()
 
 	// Connect to peer if specified
 	if cfg.connectTo != "" {
 		log.Printf("Attempting to connect to peer: %s", cfg.connectTo)
-		if err := node.Connect(ctx, cfg.connectTo); err != nil {
+		if err := netNode.Connect(ctx, cfg.connectTo); err != nil {
+			netNode.Close()
 			log.Fatalf("Failed to connect to peer: %v", err)
 		}
 		log.Printf("Successfully connected to peer")
 	}
 
-	// Initialize drand beacon client
-	log.Printf("Initializing drand beacon client")
-	b, err := beacon.NewDrandBeacon(cfg.drandURL)
+	// Create DAG-Time node
+	log.Printf("Creating DAG-Time node")
+	node, err := dagtime.NewNode(ctx, netNode.Host, cfg.drandURL)
 	if err != nil {
-		log.Fatalf("Failed to create beacon client: %v", err)
+		netNode.Close()
+		log.Fatalf("Failed to create DAG-Time node: %v", err)
 	}
+	defer func() {
+		log.Printf("Closing nodes")
+		node.Close()
+		netNode.Close()
+	}()
 
 	// Start beacon fetching
 	log.Printf("Starting beacon fetching")
-	if err := b.Start(ctx, cfg.drandInterval); err != nil {
+	if err := node.Beacon.Start(ctx, cfg.drandInterval); err != nil {
 		log.Fatalf("Failed to start beacon: %v", err)
 	}
-	defer func() {
-		log.Printf("Stopping beacon")
-		b.Stop()
-	}()
-
-	// Create event pool
-	log.Printf("Creating event pool")
-	p, err := pool.NewPool(ctx, node.Host)
-	if err != nil {
-		log.Fatalf("Failed to create pool: %v", err)
-	}
-	defer func() {
-		log.Printf("Closing pool")
-		p.Close()
-	}()
 
 	// Start event generation
 	ticker := time.NewTicker(cfg.eventRate)
@@ -164,11 +151,11 @@ func main() {
 			log.Println("Shutting down...")
 			return
 
-		case round := <-b.Rounds():
+		case round := <-node.Beacon.Rounds():
 			log.Printf("Received beacon round %d", round.Number)
 			// Anchor to beacon based on anchor interval
 			if lastEventID != "" && eventCount%cfg.anchorInterval == 0 {
-				if event, err := p.GetEvent(lastEventID); err == nil {
+				if event, err := node.Pool.GetEvent(lastEventID); err == nil {
 					event.SetBeaconRound(round.Number, round.Randomness)
 					log.Printf("Anchored event %s to beacon round %d", lastEventID, round.Number)
 				}
@@ -185,14 +172,14 @@ func main() {
 
 			// Create sub-event based on complexity setting
 			if eventCount > 1 && lastEventID != "" && rand.Float64() < float64(cfg.subEventComplexity) {
-				err = p.AddSubEvent(ctx, data, lastEventID, nil)
+				err = node.Pool.AddSubEvent(ctx, data, lastEventID, nil)
 				if err != nil {
 					log.Printf("Failed to add sub-event: %v", err)
 					continue
 				}
 				log.Printf("Added sub-event with parent %s", lastEventID)
 			} else {
-				err = p.AddEvent(ctx, data, parents)
+				err = node.Pool.AddEvent(ctx, data, parents)
 				if err != nil {
 					log.Printf("Failed to add event: %v", err)
 					continue
@@ -201,13 +188,13 @@ func main() {
 			}
 
 			// Get all events and update lastEventID
-			events := p.GetEvents()
+			events := node.Pool.GetEvents()
 			if len(events) > 0 {
 				lastEventID = events[len(events)-1].ID
 			}
 
 			// Log pool state
-			peers := p.GetPeers()
+			peers := node.Pool.GetPeers()
 			log.Printf("Pool state: %d events, %d peers", len(events), len(peers))
 
 			// Log peer IDs at a lower frequency to reduce noise
@@ -220,7 +207,7 @@ func main() {
 
 			// Verify the event chain periodically
 			if eventCount%cfg.verifyInterval == 0 && lastEventID != "" {
-				if err := p.VerifyEvent(lastEventID); err != nil {
+				if err := node.Pool.VerifyEvent(lastEventID); err != nil {
 					log.Printf("Event chain verification failed: %v", err)
 				} else {
 					log.Printf("Event chain verification successful")
