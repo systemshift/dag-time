@@ -98,7 +98,7 @@ func (d *DrandBeacon) GetLatestRound(ctx context.Context) (*Round, error) {
 		Number:     result.Round,
 		Randomness: randomness,
 		Signature:  signature,
-		Timestamp:  time.Unix(int64(result.Timestamp), 0),
+		Timestamp:  time.Unix(validateTimestamp(result.Timestamp), 0),
 	}, nil
 }
 
@@ -154,4 +154,13 @@ func (d *DrandBeacon) Stop() error {
 // Rounds returns a channel that receives new rounds
 func (d *DrandBeacon) Rounds() <-chan *Round {
 	return d.roundChan
+}
+
+// validateTimestamp ensures the timestamp is within valid int64 range
+func validateTimestamp(ts uint64) int64 {
+	if ts > uint64(1<<63-1) {
+		// If timestamp is too large, return max int64
+		return 1<<63 - 1
+	}
+	return int64(ts)
 }

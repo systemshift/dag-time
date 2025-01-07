@@ -4,6 +4,7 @@ package dagtime
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/systemshift/dag-time/pkg/beacon"
@@ -45,7 +46,9 @@ func NewNode(ctx context.Context, h host.Host, drandURL string) (*Node, error) {
 
 // Close shuts down the node and all its components
 func (n *Node) Close() error {
-	n.Beacon.Stop() // drand beacon stop is idempotent, error can be ignored
+	if err := n.Beacon.Stop(); err != nil {
+		log.Printf("Error stopping beacon: %v", err)
+	}
 	if err := n.Pool.Close(); err != nil {
 		return fmt.Errorf("closing pool: %w", err)
 	}
