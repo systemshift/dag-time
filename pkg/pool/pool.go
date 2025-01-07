@@ -42,8 +42,10 @@ func (p *Pool) GetHost() host.Host {
 func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 	log.Printf("Creating new pool with host ID: %s", h.ID())
 
-	// Create pubsub
-	ps, err := pubsub.NewGossipSub(ctx, h)
+	// Create pubsub with GossipSub
+	ps, err := pubsub.NewGossipSub(ctx, h,
+		pubsub.WithMessageSigning(true),
+		pubsub.WithStrictSignatureVerification(true))
 	if err != nil {
 		return nil, fmt.Errorf("creating pubsub: %w", err)
 	}
@@ -54,7 +56,10 @@ func NewPool(ctx context.Context, h host.Host) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("joining topic: %w", err)
 	}
-	log.Printf("Joined topic: %s", TopicName)
+	log.Printf("Successfully joined topic: %s", TopicName)
+
+	// Wait for pubsub to initialize
+	time.Sleep(time.Second)
 
 	// Subscribe to topic
 	sub, err := topic.Subscribe()
@@ -361,6 +366,35 @@ func (p *Pool) GetPeers() map[peer.ID]time.Time {
 		peers[id] = lastSeen
 	}
 	return peers
+}
+
+// GetTopicPeers returns all peers in the pubsub topic
+func (p *Pool) GetTopicPeers() []peer.ID {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	peers := p.topic.ListPeers()
+	log.Printf("Topic peers: %v", peers)
+	return peers
+}
+
+// WaitForTopicPeer waits for a specific peer to join the topic
+func (p *Pool) WaitForTopicPeer(ctx context.Context, peerID peer.ID) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			peers := p.GetTopicPeers()
+			for _, id := range peers {
+				if id == peerID {
+					return nil
+				}
+			}
+		}
+	}
 }
 
 // VerifyEvent verifies an event and its chain of ancestors

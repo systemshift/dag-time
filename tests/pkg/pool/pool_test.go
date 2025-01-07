@@ -86,14 +86,11 @@ func TestPool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Wait for connection and pubsub to establish
+	// Wait for network connection
 	connected := make(chan struct{})
 	go func() {
 		for {
-			// Check both network connection and pubsub peers
-			if len(h1.Network().Peers()) > 0 && len(p1.GetPeers()) > 0 {
-				// Wait a bit more for pubsub to fully establish
-				time.Sleep(time.Second)
+			if len(h1.Network().Peers()) > 0 {
 				close(connected)
 				return
 			}
@@ -103,11 +100,25 @@ func TestPool(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		t.Fatal("Timeout waiting for connection")
+		t.Fatal("Timeout waiting for network connection")
 	case <-connected:
-		t.Logf("Connection established - Network peers: %d, PubSub peers: %d",
-			len(h1.Network().Peers()), len(p1.GetPeers()))
+		t.Logf("Network connection established - Peers: %d", len(h1.Network().Peers()))
 	}
+
+	// Wait for peers to see each other in topic
+	t.Log("Waiting for p1 to see p2 in topic")
+	err = p1.WaitForTopicPeer(ctx, h2.ID())
+	require.NoError(t, err)
+
+	t.Log("Waiting for p2 to see p1 in topic")
+	err = p2.WaitForTopicPeer(ctx, h1.ID())
+	require.NoError(t, err)
+
+	t.Logf("Topic peers - p1: %v, p2: %v", p1.GetTopicPeers(), p2.GetTopicPeers())
+
+	// Wait for pubsub to fully stabilize
+	time.Sleep(5 * time.Second)
+	t.Log("Pubsub stabilization period complete")
 
 	t.Run("Basic Event Creation and Propagation", func(t *testing.T) {
 		// Add event to first pool
