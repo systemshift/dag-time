@@ -3,7 +3,10 @@ package pool
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -11,6 +14,11 @@ import (
 	"github.com/systemshift/dag-time/beacon"
 	"github.com/systemshift/dag-time/dag"
 )
+
+func init() {
+	// Seed random number generator
+	rand.Seed(time.Now().UnixNano())
+}
 
 // Config represents pool configuration
 type Config struct {
@@ -48,7 +56,17 @@ type eventPool struct {
 	cancel   context.CancelFunc
 	eventCh  chan *dag.Event
 	beaconCh <-chan *beacon.Round
+
+	// Track recent events for sub-event relationships
+	recentEvents []string
 }
+
+const (
+	// Maximum number of recent events to track
+	maxRecentEvents = 100
+	// Maximum number of parents for a sub-event
+	maxSubEventParents = 3
+)
 
 // ErrInvalidConfig indicates the pool configuration is invalid
 var ErrInvalidConfig = fmt.Errorf("invalid pool configuration")
@@ -84,12 +102,13 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 	}
 
 	p := &eventPool{
-		cfg:      cfg,
-		host:     h,
-		dag:      d,
-		beacon:   b,
-		eventCh:  make(chan *dag.Event, 100),
-		beaconCh: beaconCh,
+		cfg:          cfg,
+		host:         h,
+		dag:          d,
+		beacon:       b,
+		eventCh:      make(chan *dag.Event, 100),
+		beaconCh:     beaconCh,
+		recentEvents: make([]string, 0, maxRecentEvents),
 	}
 
 	// Start processing events
@@ -102,12 +121,60 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 	return p, nil
 }
 
+// generateID creates a random event ID
+func generateID() string {
+	b := make([]byte, 16)
+	cryptorand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// shouldCreateSubEvent determines if we should create a sub-event
+func (p *eventPool) shouldCreateSubEvent() bool {
+	return rand.Float64() < p.cfg.SubEventComplex
+}
+
+// selectRandomParents selects random parent events from recent events
+func (p *eventPool) selectRandomParents(count int) []string {
+	if len(p.recentEvents) == 0 {
+		return nil
+	}
+
+	// Randomly select up to count parents
+	parents := make([]string, 0, count)
+	seen := make(map[string]bool)
+
+	for i := 0; i < count && i < len(p.recentEvents); i++ {
+		// Try up to 5 times to find an unused parent
+		for j := 0; j < 5; j++ {
+			idx := rand.Intn(len(p.recentEvents))
+			id := p.recentEvents[idx]
+			if !seen[id] {
+				parents = append(parents, id)
+				seen[id] = true
+				break
+			}
+		}
+	}
+
+	return parents
+}
+
+// addRecentEvent adds an event ID to the recent events list
+func (p *eventPool) addRecentEvent(id string) {
+	p.recentEvents = append(p.recentEvents, id)
+	if len(p.recentEvents) > maxRecentEvents {
+		p.recentEvents = p.recentEvents[1:]
+	}
+}
+
 func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string) error {
 	if !p.running {
 		return fmt.Errorf("pool is not running")
 	}
 
 	event := &dag.Event{
+		ID:      generateID(),
+		Type:    dag.MainEvent,
 		Data:    data,
 		Parents: parents,
 	}
@@ -149,9 +216,38 @@ func (p *eventPool) run(ctx context.Context) {
 			return
 
 		case event := <-p.eventCh:
+			// Add the event to the DAG
 			if err := p.dag.AddEvent(ctx, event); err != nil {
 				// TODO: Handle error (retry, log, etc)
 				continue
+			}
+
+			// Track the event
+			p.addRecentEvent(event.ID)
+
+			// Maybe create sub-events
+			if p.shouldCreateSubEvent() {
+				numSubEvents := rand.Intn(3) + 1 // 1-3 sub-events
+				for i := 0; i < numSubEvents; i++ {
+					subEvent := &dag.Event{
+						ID:       generateID(),
+						Type:     dag.SubEvent,
+						ParentID: event.ID,
+						Data:     []byte(fmt.Sprintf("sub-event-%d", i)),
+					}
+
+					// Maybe connect to other sub-events
+					if rand.Float64() < p.cfg.SubEventComplex {
+						parentCount := rand.Intn(maxSubEventParents) + 1
+						subEvent.Parents = p.selectRandomParents(parentCount)
+					}
+
+					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
+						// TODO: Handle error
+						continue
+					}
+					p.addRecentEvent(subEvent.ID)
+				}
 			}
 
 			eventCount++
