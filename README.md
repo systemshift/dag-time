@@ -1,5 +1,9 @@
 # DAG-Time: Integrating a Global Clock with Local Event Streams
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/systemshift/dag-time.svg)](https://pkg.go.dev/github.com/systemshift/dag-time)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/systemshift/dag-time)](https://go.dev/doc/devel/release)
+[![License](https://img.shields.io/github/license/systemshift/dag-time)](LICENSE)
+
 ## Overview
 
 DAG-Time is a trusted time source—powered by drand—with a local Directed Acyclic Graph (DAG) of events. The goal is to provide a verifiable timeline for fast-evolving local event streams while periodically anchoring them to a well-known global clock for trust and auditability.
@@ -18,9 +22,10 @@ Then import the packages you need:
 
 ```go
 import (
-    "github.com/systemshift/dag-time/pkg/dag"
-    "github.com/systemshift/dag-time/pkg/pool"
-    "github.com/systemshift/dag-time/pkg/beacon"
+    "github.com/systemshift/dag-time/dag"
+    "github.com/systemshift/dag-time/pool"
+    "github.com/systemshift/dag-time/beacon"
+    "github.com/systemshift/dag-time/node"
 )
 ```
 
@@ -29,53 +34,42 @@ import (
 To install the DAG-Time command-line tool:
 
 ```bash
-go install github.com/systemshift/dag-time/cmd@latest
+go install github.com/systemshift/dag-time/cmd/dagtime@latest
 ```
 
 ## Library Usage
 
-The core functionality is available through several packages:
+The core functionality is available through the node package which provides a high-level interface:
 
 ```go
-// High-level interface
-import "github.com/systemshift/dag-time/pkg/dagtime"
-
-// Create a complete node
-node, err := dagtime.NewNode(ctx, host, "https://api.drand.sh")
-if err != nil {
-    log.Fatal(err)
-}
-defer node.Close()
-
-// Use the node's components
-err = node.Pool.AddEvent(ctx, data, parents)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Low-level interface
 import (
-    "github.com/systemshift/dag-time/pkg/dag"
-    "github.com/systemshift/dag-time/pkg/pool"
-    "github.com/systemshift/dag-time/pkg/beacon"
+    "github.com/systemshift/dag-time/network"
+    "github.com/systemshift/dag-time/node"
 )
 
-// Create components individually
-dag := dag.NewDAG()
-pool, err := pool.NewPool(ctx, host)
+// Create configuration
+cfg := node.Config{
+    Network: network.Config{
+        Port: 3000,
+    },
+    BeaconURL:       "https://api.drand.sh",
+    BeaconInterval:  10 * time.Second,
+    EventRate:       1000,
+    AnchorInterval:  5,
+    SubEventComplex: 0.3, // Probability of creating sub-events
+    VerifyInterval:  5,
+    Verbose:         true,
+}
+
+// Create node
+n, err := node.New(ctx, cfg)
 if err != nil {
     log.Fatal(err)
 }
-defer pool.Close()
+defer n.Close()
 
-beacon, err := beacon.NewDrandBeacon("https://api.drand.sh")
-if err != nil {
-    log.Fatal(err)
-}
-defer beacon.Stop()
-
-// Use components directly
-err = pool.AddEvent(ctx, data, parents)
+// Add events
+err = n.AddEvent(ctx, []byte("example-data"), nil)
 if err != nil {
     log.Fatal(err)
 }
@@ -83,10 +77,10 @@ if err != nil {
 
 ## CLI Usage
 
-Once installed, you can run the DAG-Time node with various configuration options:
+The DAG-Time CLI tool provides a complete node implementation with various configuration options:
 
 ```bash
-dag-time [options]
+dagtime [options]
 ```
 
 Network Settings:
@@ -96,21 +90,34 @@ Network Settings:
 Beacon Settings:
 - `--drand-url`: The URL of the drand HTTP endpoint (defaults to https://api.drand.sh)
 - `--drand-interval`: How often to fetch a new drand beacon (minimum 1s, default 10s)
+- `--drand-chain-hash`: drand chain hash (hex)
+- `--drand-public-key`: drand public key (hex)
 
 Event Generation Settings:
 - `--event-rate`: How quickly to generate events (minimum 1ms, default 5s)
 - `--anchor-interval`: Number of events before anchoring to drand beacon (minimum 1, default 5)
-- `--subevent-complexity`: Probability of creating sub-events (0.0-1.0, default 0.3)
-- `--verify-interval`: How often to verify event chain integrity (in number of events, minimum 1, default 5)
+- `--subevent-complexity`: Probability of creating sub-events and cross-event relationships (0.0-1.0, default 0.3)
+- `--verify-interval`: How often to verify event chain integrity (in events, minimum 1, default 5)
+- `--verbose`: Enable verbose logging of event relationships
 
 Example:
 ```bash
-dag-time \
-  --event-rate=100ms \
-  --anchor-interval=10 \
-  --subevent-complexity=0.7 \
-  --verify-interval=20 \
-  --drand-interval=5s
+dagtime \
+  --port=3000 \
+  --event-rate=1000 \
+  --anchor-interval=5 \
+  --subevent-complexity=0.8 \
+  --verify-interval=5 \
+  --verbose
+```
+
+With verbose logging enabled, you'll see the creation of events and their relationships:
+```
+Created main event e9a463b6...
+Creating 3 sub-events for e9a463b6...
+  Sub-event 5931ffa4... connects to: [14de89a8...]
+  Created sub-event 174013e9...
+  Sub-event e0823e82... connects to: [6a3e4b04... 7fbe137e...]
 ```
 
 ## What Problem Does This Solve?
