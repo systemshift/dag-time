@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"log"
 	"os"
@@ -15,16 +16,33 @@ import (
 )
 
 func main() {
+	// Default drand values from League of Entropy mainnet
+	defaultChainHash := "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"
+	defaultPublicKey := "868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784bc9402c6bc2d6cd7750008daea6c7d18e75c34b853677747f823"
+
 	// Parse flags
 	port := flag.Int("port", 0, "Node listen port (0 for random)")
 	peer := flag.String("peer", "", "Peer multiaddr to connect to")
 	beaconURL := flag.String("drand-url", "https://api.drand.sh", "drand HTTP endpoint URL")
 	beaconInterval := flag.Duration("drand-interval", 10*time.Second, "How often to fetch drand beacon")
+	beaconChainHash := flag.String("drand-chain-hash", defaultChainHash, "drand chain hash (hex)")
+	beaconPublicKey := flag.String("drand-public-key", defaultPublicKey, "drand public key (hex)")
 	eventRate := flag.Int64("event-rate", 5000, "How quickly to generate events (in milliseconds)")
 	anchorInterval := flag.Int("anchor-interval", 5, "Events before anchoring to drand beacon")
 	subEventComplex := flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events (0.0-1.0)")
 	verifyInterval := flag.Int("verify-interval", 5, "Events between verifications")
 	flag.Parse()
+
+	// Parse hex values
+	chainHash, err := hex.DecodeString(*beaconChainHash)
+	if err != nil {
+		log.Fatalf("Invalid chain hash: %v", err)
+	}
+
+	publicKey, err := hex.DecodeString(*beaconPublicKey)
+	if err != nil {
+		log.Fatalf("Invalid public key: %v", err)
+	}
 
 	// Create configuration
 	cfg := node.Config{
@@ -34,6 +52,8 @@ func main() {
 		},
 		BeaconURL:       *beaconURL,
 		BeaconInterval:  *beaconInterval,
+		BeaconChainHash: chainHash,
+		BeaconPublicKey: publicKey,
 		EventRate:       *eventRate,
 		AnchorInterval:  *anchorInterval,
 		SubEventComplex: *subEventComplex,
@@ -64,6 +84,7 @@ func main() {
 	}
 	log.Printf("  Beacon URL: %s", *beaconURL)
 	log.Printf("  Beacon Interval: %v", *beaconInterval)
+	log.Printf("  Beacon Chain Hash: %s", *beaconChainHash)
 	log.Printf("  Event Rate: %dms", *eventRate)
 	log.Printf("  Anchor Interval: %d events", *anchorInterval)
 	log.Printf("  Sub-Event Complexity: %.2f", *subEventComplex)
