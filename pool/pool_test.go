@@ -50,6 +50,18 @@ func (m *mockDAG) GetParents(ctx context.Context, id string) ([]*dag.Event, erro
 	return nil, nil
 }
 
+func (m *mockDAG) GetChildren(ctx context.Context, id string) ([]*dag.Event, error) {
+	return nil, nil
+}
+
+func (m *mockDAG) GetSubEvents(ctx context.Context, id string) ([]*dag.Event, error) {
+	return nil, nil
+}
+
+func (m *mockDAG) GetMainEvents(ctx context.Context) ([]*dag.Event, error) {
+	return nil, nil
+}
+
 func (m *mockDAG) Verify(ctx context.Context) error {
 	return nil
 }

@@ -51,14 +51,44 @@ type mockDAG struct {
 	events map[string]*dag.Event
 }
 
-func (m *mockDAG) AddEvent(ctx context.Context, event *dag.Event) error { return nil }
-func (m *mockDAG) GetEvent(ctx context.Context, id string) (*dag.Event, error) {
-	return nil, nil
+func newMockDAG() *mockDAG {
+	return &mockDAG{
+		events: make(map[string]*dag.Event),
+	}
 }
+
+func (m *mockDAG) AddEvent(ctx context.Context, event *dag.Event) error {
+	m.events[event.ID] = event
+	return nil
+}
+
+func (m *mockDAG) GetEvent(ctx context.Context, id string) (*dag.Event, error) {
+	event, ok := m.events[id]
+	if !ok {
+		return nil, dag.ErrNotFound
+	}
+	return event, nil
+}
+
 func (m *mockDAG) GetParents(ctx context.Context, id string) ([]*dag.Event, error) {
 	return nil, nil
 }
-func (m *mockDAG) Verify(ctx context.Context) error { return nil }
+
+func (m *mockDAG) GetChildren(ctx context.Context, id string) ([]*dag.Event, error) {
+	return nil, nil
+}
+
+func (m *mockDAG) GetSubEvents(ctx context.Context, id string) ([]*dag.Event, error) {
+	return nil, nil
+}
+
+func (m *mockDAG) GetMainEvents(ctx context.Context) ([]*dag.Event, error) {
+	return nil, nil
+}
+
+func (m *mockDAG) Verify(ctx context.Context) error {
+	return nil
+}
 
 type mockBeacon struct {
 	started bool
@@ -68,17 +98,21 @@ type mockBeacon struct {
 func (m *mockBeacon) GetLatestRound(ctx context.Context) (*beacon.Round, error) {
 	return &beacon.Round{Number: 1}, nil
 }
+
 func (m *mockBeacon) GetRound(ctx context.Context, round uint64) (*beacon.Round, error) {
 	return &beacon.Round{Number: round}, nil
 }
+
 func (m *mockBeacon) Start(ctx context.Context, interval time.Duration) error {
 	m.started = true
 	return nil
 }
+
 func (m *mockBeacon) Stop() error {
 	m.stopped = true
 	return nil
 }
+
 func (m *mockBeacon) Subscribe() (<-chan *beacon.Round, error) {
 	ch := make(chan *beacon.Round, 1)
 	return ch, nil
@@ -128,6 +162,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  5,
 				SubEventComplex: 0.3,
@@ -142,6 +178,8 @@ func TestNew(t *testing.T) {
 					Port: 0,
 				},
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  5,
 				SubEventComplex: 0.3,
@@ -157,6 +195,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Millisecond,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  5,
 				SubEventComplex: 0.3,
@@ -172,6 +212,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       0,
 				AnchorInterval:  5,
 				SubEventComplex: 0.3,
@@ -187,6 +229,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  0,
 				SubEventComplex: 0.3,
@@ -202,6 +246,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  5,
 				SubEventComplex: 1.5,
@@ -217,6 +263,8 @@ func TestNew(t *testing.T) {
 				},
 				BeaconURL:       "http://example.com",
 				BeaconInterval:  time.Second,
+				BeaconChainHash: []byte("chain-hash"),
+				BeaconPublicKey: []byte("public-key"),
 				EventRate:       100,
 				AnchorInterval:  5,
 				SubEventComplex: 0.3,

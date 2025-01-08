@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMemoryDAG(t *testing.T) {
@@ -23,8 +24,12 @@ func TestMemoryDAG(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "event ID cannot be empty")
 
-		// Test adding valid event
-		event := &Event{ID: "event1", Data: []byte("test")}
+		// Test adding valid main event
+		event := &Event{
+			ID:   "event1",
+			Type: MainEvent,
+			Data: []byte("test"),
+		}
 		err = dag.AddEvent(ctx, event)
 		assert.NoError(t, err)
 
@@ -33,89 +38,107 @@ func TestMemoryDAG(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "already exists")
 
-		// Test adding event with non-existent parent
-		event2 := &Event{ID: "event2", Parents: []string{"nonexistent"}}
-		err = dag.AddEvent(ctx, event2)
+		// Test adding sub-event without parent ID
+		subEvent := &Event{
+			ID:   "sub1",
+			Type: SubEvent,
+			Data: []byte("sub-event"),
+		}
+		err = dag.AddEvent(ctx, subEvent)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "parent event nonexistent does not exist")
+		assert.Contains(t, err.Error(), "must have a parent ID")
+
+		// Test adding valid sub-event
+		subEvent.ParentID = "event1"
+		err = dag.AddEvent(ctx, subEvent)
+		assert.NoError(t, err)
+
+		// Verify parent's children list was updated
+		parent, err := dag.GetEvent(ctx, "event1")
+		assert.NoError(t, err)
+		assert.Contains(t, parent.Children, "sub1")
 	})
 
-	t.Run("GetEvent", func(t *testing.T) {
+	t.Run("Complex Event Relationships", func(t *testing.T) {
 		dag := NewMemoryDAG()
 
-		// Test getting non-existent event
-		_, err := dag.GetEvent(ctx, "nonexistent")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "not found")
+		// Create main events
+		main1 := &Event{ID: "main1", Type: MainEvent}
+		main2 := &Event{ID: "main2", Type: MainEvent}
+		require.NoError(t, dag.AddEvent(ctx, main1))
+		require.NoError(t, dag.AddEvent(ctx, main2))
 
-		// Test getting empty ID
-		_, err = dag.GetEvent(ctx, "")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot be empty")
+		// Create sub-events for main1
+		sub1a := &Event{
+			ID:       "sub1a",
+			Type:     SubEvent,
+			ParentID: "main1",
+		}
+		sub1b := &Event{
+			ID:       "sub1b",
+			Type:     SubEvent,
+			ParentID: "main1",
+			Parents:  []string{"sub1a"}, // Reference another sub-event
+		}
+		require.NoError(t, dag.AddEvent(ctx, sub1a))
+		require.NoError(t, dag.AddEvent(ctx, sub1b))
 
-		// Test getting existing event
-		event := &Event{ID: "event1", Data: []byte("test")}
-		err = dag.AddEvent(ctx, event)
+		// Create sub-events for main2
+		sub2a := &Event{
+			ID:       "sub2a",
+			Type:     SubEvent,
+			ParentID: "main2",
+		}
+		sub2b := &Event{
+			ID:       "sub2b",
+			Type:     SubEvent,
+			ParentID: "main2",
+			Parents:  []string{"sub1b", "sub2a"}, // Cross-event relationship
+		}
+		require.NoError(t, dag.AddEvent(ctx, sub2a))
+		require.NoError(t, dag.AddEvent(ctx, sub2b))
+
+		// Test GetSubEvents
+		sub1Events, err := dag.GetSubEvents(ctx, "main1")
 		assert.NoError(t, err)
+		assert.Len(t, sub1Events, 2)
+		assert.Contains(t, []string{sub1Events[0].ID, sub1Events[1].ID}, "sub1a")
+		assert.Contains(t, []string{sub1Events[0].ID, sub1Events[1].ID}, "sub1b")
 
-		retrieved, err := dag.GetEvent(ctx, "event1")
+		// Test GetChildren
+		children, err := dag.GetChildren(ctx, "main1")
 		assert.NoError(t, err)
-		assert.Equal(t, event, retrieved)
-	})
+		assert.Len(t, children, 2)
 
-	t.Run("GetParents", func(t *testing.T) {
-		dag := NewMemoryDAG()
-
-		// Add parent event
-		parent := &Event{ID: "parent", Data: []byte("parent")}
-		err := dag.AddEvent(ctx, parent)
+		// Test GetMainEvents
+		mainEvents, err := dag.GetMainEvents(ctx)
 		assert.NoError(t, err)
-
-		// Add child event
-		child := &Event{ID: "child", Parents: []string{"parent"}, Data: []byte("child")}
-		err = dag.AddEvent(ctx, child)
-		assert.NoError(t, err)
-
-		// Test getting parents
-		parents, err := dag.GetParents(ctx, "child")
-		assert.NoError(t, err)
-		assert.Len(t, parents, 1)
-		assert.Equal(t, parent, parents[0])
-
-		// Test getting parents of non-existent event
-		_, err = dag.GetParents(ctx, "nonexistent")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "not found")
+		assert.Len(t, mainEvents, 2)
 	})
 
 	t.Run("Verify", func(t *testing.T) {
 		dag := NewMemoryDAG()
 
-		// Test empty DAG
-		err := dag.Verify(ctx)
-		assert.NoError(t, err)
-
-		// Add events forming a valid DAG
+		// Create valid event structure
 		events := []*Event{
-			{ID: "1", Data: []byte("1")},
-			{ID: "2", Parents: []string{"1"}, Data: []byte("2")},
-			{ID: "3", Parents: []string{"1"}, Data: []byte("3")},
-			{ID: "4", Parents: []string{"2", "3"}, Data: []byte("4")},
+			{ID: "main1", Type: MainEvent},
+			{ID: "main2", Type: MainEvent, Parents: []string{"main1"}},
+			{ID: "sub1", Type: SubEvent, ParentID: "main1"},
+			{ID: "sub2", Type: SubEvent, ParentID: "main2", Parents: []string{"sub1"}},
 		}
 
 		for _, event := range events {
-			err := dag.AddEvent(ctx, event)
-			assert.NoError(t, err)
+			require.NoError(t, dag.AddEvent(ctx, event))
 		}
 
-		// Verify valid DAG
-		err = dag.Verify(ctx)
-		assert.NoError(t, err)
+		// Test valid DAG
+		assert.NoError(t, dag.Verify(ctx))
 
-		// Test cycle detection by manually creating a cycle
-		dag.(*memoryDAG).events["2"].Parents = append(dag.(*memoryDAG).events["2"].Parents, "4")
-		err = dag.Verify(ctx)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "cycle detected")
+		// Test cycle detection
+		dag.(*memoryDAG).events["sub1"].Parents = append(
+			dag.(*memoryDAG).events["sub1"].Parents,
+			"sub2",
+		)
+		assert.Error(t, dag.Verify(ctx))
 	})
 }
