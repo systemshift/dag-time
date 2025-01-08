@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -33,6 +34,9 @@ type Config struct {
 
 	// VerifyInterval is events between verifications
 	VerifyInterval int
+
+	// Verbose enables detailed logging of event relationships
+	Verbose bool
 }
 
 // Pool manages a pool of events and handles event synchronization
@@ -222,12 +226,20 @@ func (p *eventPool) run(ctx context.Context) {
 				continue
 			}
 
+			if p.cfg.Verbose {
+				log.Printf("Created main event %s", event.ID)
+			}
+
 			// Track the event
 			p.addRecentEvent(event.ID)
 
 			// Maybe create sub-events
 			if p.shouldCreateSubEvent() {
 				numSubEvents := rand.Intn(3) + 1 // 1-3 sub-events
+				if p.cfg.Verbose {
+					log.Printf("Creating %d sub-events for %s", numSubEvents, event.ID)
+				}
+
 				for i := 0; i < numSubEvents; i++ {
 					subEvent := &dag.Event{
 						ID:       generateID(),
@@ -240,11 +252,17 @@ func (p *eventPool) run(ctx context.Context) {
 					if rand.Float64() < p.cfg.SubEventComplex {
 						parentCount := rand.Intn(maxSubEventParents) + 1
 						subEvent.Parents = p.selectRandomParents(parentCount)
+						if p.cfg.Verbose && len(subEvent.Parents) > 0 {
+							log.Printf("  Sub-event %s connects to: %v", subEvent.ID, subEvent.Parents)
+						}
 					}
 
 					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
 						// TODO: Handle error
 						continue
+					}
+					if p.cfg.Verbose {
+						log.Printf("  Created sub-event %s", subEvent.ID)
 					}
 					p.addRecentEvent(subEvent.ID)
 				}

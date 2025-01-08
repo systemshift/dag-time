@@ -29,8 +29,9 @@ func main() {
 	beaconPublicKey := flag.String("drand-public-key", defaultPublicKey, "drand public key (hex)")
 	eventRate := flag.Int64("event-rate", 5000, "How quickly to generate events (in milliseconds)")
 	anchorInterval := flag.Int("anchor-interval", 5, "Events before anchoring to drand beacon")
-	subEventComplex := flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events (0.0-1.0)")
+	subEventComplex := flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events and cross-event relationships (0.0-1.0)")
 	verifyInterval := flag.Int("verify-interval", 5, "Events between verifications")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging of event relationships")
 	flag.Parse()
 
 	// Parse hex values
@@ -89,6 +90,15 @@ func main() {
 	log.Printf("  Anchor Interval: %d events", *anchorInterval)
 	log.Printf("  Sub-Event Complexity: %.2f", *subEventComplex)
 	log.Printf("  Verify Interval: %d events", *verifyInterval)
+	log.Printf("  Verbose Logging: %v", *verbose)
+
+	if *verbose {
+		log.Printf("\nEvent relationships will be logged as they are created.")
+		log.Printf("- Main events are top-level events in the DAG")
+		log.Printf("- Sub-events are spawned by main events")
+		log.Printf("- Sub-events can connect to other sub-events")
+		log.Printf("- Higher complexity means more sub-events and connections")
+	}
 
 	// Wait for interrupt
 	sigCh := make(chan os.Signal, 1)
