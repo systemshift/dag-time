@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-dag-time
+bin/
 
 # Test binary, built with `go test -c`
 *.test
@@ -26,9 +26,4 @@ go.work
 
 # OS specific files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+.env
