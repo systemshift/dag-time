@@ -16,10 +16,8 @@ import (
 	"github.com/systemshift/dag-time/dag"
 )
 
-func init() {
-	// Seed random number generator
-	rand.Seed(time.Now().UnixNano())
-}
+// Create a local random number generator
+var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // Config represents pool configuration
 type Config struct {
@@ -128,13 +126,15 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 // generateID creates a random event ID
 func generateID() string {
 	b := make([]byte, 16)
-	cryptorand.Read(b)
+	if _, err := cryptorand.Read(b); err != nil {
+		panic(fmt.Sprintf("failed to generate random ID: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
 // shouldCreateSubEvent determines if we should create a sub-event
 func (p *eventPool) shouldCreateSubEvent() bool {
-	return rand.Float64() < p.cfg.SubEventComplex
+	return rng.Float64() < p.cfg.SubEventComplex
 }
 
 // selectRandomParents selects random parent events from recent events
@@ -150,7 +150,7 @@ func (p *eventPool) selectRandomParents(count int) []string {
 	for i := 0; i < count && i < len(p.recentEvents); i++ {
 		// Try up to 5 times to find an unused parent
 		for j := 0; j < 5; j++ {
-			idx := rand.Intn(len(p.recentEvents))
+			idx := rng.Intn(len(p.recentEvents))
 			id := p.recentEvents[idx]
 			if !seen[id] {
 				parents = append(parents, id)
@@ -222,7 +222,7 @@ func (p *eventPool) run(ctx context.Context) {
 		case event := <-p.eventCh:
 			// Add the event to the DAG
 			if err := p.dag.AddEvent(ctx, event); err != nil {
-				// TODO: Handle error (retry, log, etc)
+				log.Printf("Failed to add event: %v", err)
 				continue
 			}
 
@@ -235,7 +235,7 @@ func (p *eventPool) run(ctx context.Context) {
 
 			// Maybe create sub-events
 			if p.shouldCreateSubEvent() {
-				numSubEvents := rand.Intn(3) + 1 // 1-3 sub-events
+				numSubEvents := rng.Intn(3) + 1 // 1-3 sub-events
 				if p.cfg.Verbose {
 					log.Printf("Creating %d sub-events for %s", numSubEvents, event.ID)
 				}
@@ -249,8 +249,8 @@ func (p *eventPool) run(ctx context.Context) {
 					}
 
 					// Maybe connect to other sub-events
-					if rand.Float64() < p.cfg.SubEventComplex {
-						parentCount := rand.Intn(maxSubEventParents) + 1
+					if rng.Float64() < p.cfg.SubEventComplex {
+						parentCount := rng.Intn(maxSubEventParents) + 1
 						subEvent.Parents = p.selectRandomParents(parentCount)
 						if p.cfg.Verbose && len(subEvent.Parents) > 0 {
 							log.Printf("  Sub-event %s connects to: %v", subEvent.ID, subEvent.Parents)
@@ -258,7 +258,7 @@ func (p *eventPool) run(ctx context.Context) {
 					}
 
 					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
-						// TODO: Handle error
+						log.Printf("Failed to add sub-event: %v", err)
 						continue
 					}
 					if p.cfg.Verbose {
@@ -285,7 +285,7 @@ func (p *eventPool) run(ctx context.Context) {
 
 		case <-verifyTicker.C:
 			if err := p.dag.Verify(ctx); err != nil {
-				// TODO: Handle verification failure
+				log.Printf("DAG verification failed: %v", err)
 			}
 		}
 	}

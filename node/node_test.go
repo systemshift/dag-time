@@ -51,12 +51,6 @@ type mockDAG struct {
 	events map[string]*dag.Event
 }
 
-func newMockDAG() *mockDAG {
-	return &mockDAG{
-		events: make(map[string]*dag.Event),
-	}
-}
-
 func (m *mockDAG) AddEvent(ctx context.Context, event *dag.Event) error {
 	m.events[event.ID] = event
 	return nil

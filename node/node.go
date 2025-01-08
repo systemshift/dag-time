@@ -108,8 +108,13 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		Verbose:         cfg.Verbose,
 	})
 	if err != nil {
-		b.Stop()
-		n.Close()
+		if err := b.Stop(); err != nil {
+			n.Close()
+			return nil, fmt.Errorf("failed to stop beacon: %w", err)
+		}
+		if err := n.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close network: %w", err)
+		}
 		return nil, fmt.Errorf("failed to create pool: %w", err)
 	}
 
