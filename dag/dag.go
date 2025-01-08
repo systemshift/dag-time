@@ -3,6 +3,12 @@ package dag
 
 import (
 	"context"
+	"fmt"
+)
+
+// Common errors
+var (
+	ErrNotFound = fmt.Errorf("event not found")
 )
 
 // Event represents a node in the DAG
