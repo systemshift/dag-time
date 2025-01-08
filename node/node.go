@@ -28,6 +28,7 @@ type Config struct {
 	AnchorInterval  int
 	SubEventComplex float64
 	VerifyInterval  int
+	Verbose         bool
 }
 
 // Node represents a complete DAG-Time node
@@ -104,6 +105,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		AnchorInterval:  cfg.AnchorInterval,
 		SubEventComplex: cfg.SubEventComplex,
 		VerifyInterval:  cfg.VerifyInterval,
+		Verbose:         cfg.Verbose,
 	})
 	if err != nil {
 		b.Stop()
