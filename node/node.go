@@ -18,10 +18,10 @@ type Config struct {
 	Network network.Config
 
 	// Beacon configuration
-	BeaconURL       string
-	BeaconInterval  time.Duration
-	BeaconChainHash []byte
-	BeaconPublicKey []byte
+	BeaconURL         string
+	BeaconInterval    time.Duration
+	BeaconChainHash   []byte
+	BeaconPublicKey   []byte
 	BeaconGenesisTime int64
 
 	// Pool configuration
