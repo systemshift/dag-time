@@ -22,10 +22,11 @@ func TestNewBeacon(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				URL:       "http://example.com",
-				ChainHash: []byte("chain-hash"),
-				PublicKey: []byte("public-key"),
-				Period:    time.Second,
+				URL:         "http://example.com",
+				ChainHash:   []byte("chain-hash"),
+				PublicKey:   []byte("public-key"),
+				Period:      time.Second,
+				GenesisTime: time.Now().Unix(),
 			},
 			wantErr: false,
 		},
@@ -85,7 +86,6 @@ func TestDrandBeacon(t *testing.T) {
 		Round:      123,
 		Randomness: hex.EncodeToString([]byte("random-bytes")),
 		Signature:  hex.EncodeToString([]byte("signature-bytes")),
-		Timestamp:  float64(time.Now().Unix()),
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,10 +98,11 @@ func TestDrandBeacon(t *testing.T) {
 
 	// Create beacon
 	cfg := Config{
-		URL:       server.URL,
-		ChainHash: []byte("chain-hash"),
-		PublicKey: []byte("public-key"),
-		Period:    time.Second,
+		URL:         server.URL,
+		ChainHash:   []byte("chain-hash"),
+		PublicKey:   []byte("public-key"),
+		Period:      time.Second,
+		GenesisTime: time.Now().Add(-time.Hour).Unix(), // 1 hour ago
 	}
 
 	b, err := NewBeacon(cfg)
