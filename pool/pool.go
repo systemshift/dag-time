@@ -61,6 +61,9 @@ type eventPool struct {
 
 	// Track recent events for sub-event relationships
 	recentEvents []string
+
+	// Track last beacon round used for anchoring
+	lastBeaconRound uint64
 }
 
 const (
@@ -171,6 +174,53 @@ func (p *eventPool) addRecentEvent(id string) {
 	}
 }
 
+// ensureBeaconRound gets a beacon round for anchoring, trying channel first then direct fetch
+func (p *eventPool) ensureBeaconRound(ctx context.Context) (*beacon.Round, error) {
+	// Try to get from channel first (most recent)
+	select {
+	case round := <-p.beaconCh:
+		if err := p.validateBeaconRound(round); err != nil {
+			return nil, fmt.Errorf("invalid beacon from channel: %w", err)
+		}
+		return round, nil
+	default:
+		// Channel is empty, fetch directly from beacon
+		round, err := p.beacon.GetLatestRound(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.validateBeaconRound(round); err != nil {
+			return nil, fmt.Errorf("invalid beacon from API: %w", err)
+		}
+		return round, nil
+	}
+}
+
+// validateBeaconRound performs basic validation on a beacon round
+func (p *eventPool) validateBeaconRound(round *beacon.Round) error {
+	if round == nil {
+		return fmt.Errorf("beacon round is nil")
+	}
+	if round.Number == 0 {
+		return fmt.Errorf("invalid round number: %d", round.Number)
+	}
+	if len(round.Randomness) == 0 {
+		return fmt.Errorf("beacon randomness is empty")
+	}
+	if len(round.Signature) == 0 {
+		return fmt.Errorf("beacon signature is empty")
+	}
+
+	// Check if beacon is reasonably recent (not older than 1 hour)
+	maxAge := time.Hour
+	age := time.Since(round.Timestamp)
+	if age > maxAge {
+		return fmt.Errorf("beacon round %d is too old: %v", round.Number, age)
+	}
+
+	return nil
+}
+
 func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string) error {
 	if !p.running {
 		return fmt.Errorf("pool is not running")
@@ -270,16 +320,28 @@ func (p *eventPool) run(ctx context.Context) {
 
 			eventCount++
 			if eventCount >= p.cfg.AnchorInterval {
-				// Anchor to latest beacon round
-				select {
-				case round := <-p.beaconCh:
-					event.Beacon = &dag.BeaconAnchor{
-						Round:      round.Number,
-						Randomness: round.Randomness,
+				// ALWAYS anchor - this ensures deterministic spine intervals
+				round, err := p.ensureBeaconRound(ctx)
+				if err != nil {
+					log.Printf("Failed to get beacon for anchoring: %v", err)
+					// Continue without anchoring this time, but don't reset counter
+					// This ensures we'll try again on the next event
+				} else {
+					// Validate monotonic progression - only anchor if beacon is newer
+					if round.Number > p.lastBeaconRound {
+						event.Beacon = &dag.BeaconAnchor{
+							Round:      round.Number,
+							Randomness: round.Randomness,
+						}
+						p.lastBeaconRound = round.Number
+						eventCount = 0
+						if p.cfg.Verbose {
+							log.Printf("Anchored event %s to drand round %d", event.ID, round.Number)
+						}
+					} else {
+						log.Printf("Skipping stale beacon round %d (last: %d)", round.Number, p.lastBeaconRound)
+						// Don't reset counter - we'll try again next time
 					}
-					eventCount = 0
-				default:
-					// No beacon round available, continue
 				}
 			}
 
