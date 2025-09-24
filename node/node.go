@@ -22,6 +22,7 @@ type Config struct {
 	BeaconInterval  time.Duration
 	BeaconChainHash []byte
 	BeaconPublicKey []byte
+	BeaconGenesisTime int64
 
 	// Pool configuration
 	EventRate       int64
@@ -83,10 +84,11 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 
 	// Create beacon
 	b, err := beacon.NewBeacon(beacon.Config{
-		URL:       cfg.BeaconURL,
-		Period:    cfg.BeaconInterval,
-		ChainHash: cfg.BeaconChainHash,
-		PublicKey: cfg.BeaconPublicKey,
+		URL:         cfg.BeaconURL,
+		Period:      cfg.BeaconInterval,
+		ChainHash:   cfg.BeaconChainHash,
+		PublicKey:   cfg.BeaconPublicKey,
+		GenesisTime: cfg.BeaconGenesisTime,
 	})
 	if err != nil {
 		n.Close()

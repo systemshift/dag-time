@@ -19,6 +19,7 @@ func main() {
 	// Default drand values from League of Entropy mainnet
 	defaultChainHash := "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"
 	defaultPublicKey := "868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784bc9402c6bc2d6cd7750008daea6c7d18e75c34b853677747f823"
+	defaultGenesisTime := int64(1595431050) // drand mainnet genesis time
 
 	// Parse flags
 	port := flag.Int("port", 0, "Node listen port (0 for random)")
@@ -27,6 +28,7 @@ func main() {
 	beaconInterval := flag.Duration("drand-interval", 10*time.Second, "How often to fetch drand beacon")
 	beaconChainHash := flag.String("drand-chain-hash", defaultChainHash, "drand chain hash (hex)")
 	beaconPublicKey := flag.String("drand-public-key", defaultPublicKey, "drand public key (hex)")
+	beaconGenesisTime := flag.Int64("drand-genesis-time", defaultGenesisTime, "drand genesis time (unix timestamp)")
 	eventRate := flag.Int64("event-rate", 5000, "How quickly to generate events (in milliseconds)")
 	anchorInterval := flag.Int("anchor-interval", 5, "Events before anchoring to drand beacon")
 	subEventComplex := flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events and cross-event relationships (0.0-1.0)")
@@ -51,14 +53,15 @@ func main() {
 			Port: *port,
 			Peer: *peer,
 		},
-		BeaconURL:       *beaconURL,
-		BeaconInterval:  *beaconInterval,
-		BeaconChainHash: chainHash,
-		BeaconPublicKey: publicKey,
-		EventRate:       *eventRate,
-		AnchorInterval:  *anchorInterval,
-		SubEventComplex: *subEventComplex,
-		VerifyInterval:  *verifyInterval,
+		BeaconURL:         *beaconURL,
+		BeaconInterval:    *beaconInterval,
+		BeaconChainHash:   chainHash,
+		BeaconPublicKey:   publicKey,
+		BeaconGenesisTime: *beaconGenesisTime,
+		EventRate:         *eventRate,
+		AnchorInterval:    *anchorInterval,
+		SubEventComplex:   *subEventComplex,
+		VerifyInterval:    *verifyInterval,
 	}
 
 	// Validate configuration

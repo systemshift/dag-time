@@ -53,6 +53,9 @@ type Config struct {
 
 	// Period is the duration between rounds
 	Period time.Duration
+
+	// GenesisTime is the UNIX timestamp when the drand network started
+	GenesisTime int64
 }
 
 // ErrInvalidConfig indicates the beacon configuration is invalid
@@ -71,6 +74,9 @@ func NewBeacon(cfg Config) (Beacon, error) {
 	}
 	if cfg.Period <= 0 {
 		return nil, fmt.Errorf("%w: Period must be positive", ErrInvalidConfig)
+	}
+	if cfg.GenesisTime <= 0 {
+		return nil, fmt.Errorf("%w: GenesisTime must be positive", ErrInvalidConfig)
 	}
 
 	return newDrandBeacon(cfg)

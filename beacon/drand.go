@@ -23,10 +23,10 @@ type drandBeacon struct {
 }
 
 type drandResponse struct {
-	Round      uint64  `json:"round"`
-	Randomness string  `json:"randomness"`
-	Signature  string  `json:"signature"`
-	Timestamp  float64 `json:"previous_signature"` // Unix timestamp
+	Round      uint64 `json:"round"`
+	Randomness string `json:"randomness"`
+	Signature  string `json:"signature"`
+	// Note: timestamp is calculated from round number, not in JSON response
 }
 
 func newDrandBeacon(cfg Config) (*drandBeacon, error) {
@@ -75,11 +75,14 @@ func (d *drandBeacon) parseResponse(r io.Reader) (*Round, error) {
 		return nil, fmt.Errorf("failed to decode signature: %w", err)
 	}
 
+	// Calculate timestamp: genesis_time + (round - 1) * period_seconds
+	roundTimestamp := time.Unix(d.cfg.GenesisTime, 0).Add(time.Duration(resp.Round-1) * d.cfg.Period)
+
 	return &Round{
 		Number:     resp.Round,
 		Randomness: randomness,
 		Signature:  signature,
-		Timestamp:  time.Unix(int64(resp.Timestamp), 0),
+		Timestamp:  roundTimestamp,
 	}, nil
 }
 

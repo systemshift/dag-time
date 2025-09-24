@@ -19,15 +19,16 @@ func main() {
 		Network: network.Config{
 			Port: 3000,
 		},
-		BeaconURL:       "https://api.drand.sh",
-		BeaconInterval:  10 * time.Second,
-		BeaconChainHash: []byte("8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"),
-		BeaconPublicKey: []byte("868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784bc9402c6bc2d6cd7750008daea6c7d18e75c34b853677747f823"),
-		EventRate:       1000,
-		AnchorInterval:  5,
-		SubEventComplex: 0.8,
-		VerifyInterval:  5,
-		Verbose:         true,
+		BeaconURL:         "https://api.drand.sh",
+		BeaconInterval:    10 * time.Second,
+		BeaconChainHash:   []byte("8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"),
+		BeaconPublicKey:   []byte("868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784bc9402c6bc2d6cd7750008daea6c7d18e75c34b853677747f823"),
+		BeaconGenesisTime: 1595431050, // drand mainnet genesis time
+		EventRate:         1000,
+		AnchorInterval:    5,
+		SubEventComplex:   0.8,
+		VerifyInterval:    5,
+		Verbose:           true,
 	}
 
 	// Create context
