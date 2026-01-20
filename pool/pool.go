@@ -3,8 +3,6 @@ package pool
 
 import (
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math/rand"
@@ -126,13 +124,15 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 	return p, nil
 }
 
-// generateID creates a random event ID
-func generateID() string {
-	b := make([]byte, 16)
-	if _, err := cryptorand.Read(b); err != nil {
-		panic(fmt.Sprintf("failed to generate random ID: %v", err))
+// computeEventCID computes and sets the content-addressed ID for an event.
+// Returns an error if CID computation fails.
+func computeEventCID(event *dag.Event) error {
+	cid, err := dag.ComputeCID(event)
+	if err != nil {
+		return fmt.Errorf("failed to compute CID: %w", err)
 	}
-	return hex.EncodeToString(b)
+	event.ID = cid
+	return nil
 }
 
 // shouldCreateSubEvent determines if we should create a sub-event
@@ -227,10 +227,14 @@ func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string)
 	}
 
 	event := &dag.Event{
-		ID:      generateID(),
 		Type:    dag.MainEvent,
 		Data:    data,
 		Parents: parents,
+	}
+
+	// Compute content-addressed ID
+	if err := computeEventCID(event); err != nil {
+		return err
 	}
 
 	select {
@@ -292,7 +296,6 @@ func (p *eventPool) run(ctx context.Context) {
 
 				for i := 0; i < numSubEvents; i++ {
 					subEvent := &dag.Event{
-						ID:       generateID(),
 						Type:     dag.SubEvent,
 						ParentID: event.ID,
 						Data:     []byte(fmt.Sprintf("sub-event-%d", i)),
@@ -302,9 +305,16 @@ func (p *eventPool) run(ctx context.Context) {
 					if rng.Float64() < p.cfg.SubEventComplex {
 						parentCount := rng.Intn(maxSubEventParents) + 1
 						subEvent.Parents = p.selectRandomParents(parentCount)
-						if p.cfg.Verbose && len(subEvent.Parents) > 0 {
-							log.Printf("  Sub-event %s connects to: %v", subEvent.ID, subEvent.Parents)
-						}
+					}
+
+					// Compute content-addressed ID (after parents are set)
+					if err := computeEventCID(subEvent); err != nil {
+						log.Printf("Failed to compute sub-event CID: %v", err)
+						continue
+					}
+
+					if p.cfg.Verbose && len(subEvent.Parents) > 0 {
+						log.Printf("  Sub-event %s connects to: %v", subEvent.ID, subEvent.Parents)
 					}
 
 					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
