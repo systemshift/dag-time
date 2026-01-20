@@ -142,8 +142,10 @@ func (d *drandBeacon) run(ctx context.Context, interval time.Duration) {
 			for _, ch := range d.subscribers {
 				select {
 				case ch <- round:
+					// Sent successfully
 				default:
-					// Skip if subscriber is not ready
+					// Channel full, skip this subscriber (non-blocking)
+					continue
 				}
 			}
 			d.mu.RUnlock()
