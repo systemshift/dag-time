@@ -224,12 +224,9 @@ func (d *ipfsDAG) AddEvent(ctx context.Context, event *Event) error {
 		return fmt.Errorf("failed to store event in IPFS: %w", err)
 	}
 
-	// Verify CID matches (content addressing)
-	if storedCID != event.ID {
-		// IPFS uses different hashing, so we store our computed CID as the key
-		// but keep the IPFS CID for retrieval
-		// For now, we'll use our CID as the canonical ID
-	}
+	// Note: IPFS returns its own CID (storedCID) which differs from our computed CID (event.ID)
+	// We use our computed CID as the canonical ID and store the mapping locally
+	_ = storedCID // Acknowledge IPFS CID (unused - we use our own content-addressed ID)
 
 	// Update local index
 	d.events[event.ID] = event
