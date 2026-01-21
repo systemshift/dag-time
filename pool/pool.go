@@ -37,8 +37,14 @@ type Config struct {
 
 // Pool manages a pool of events and handles event synchronization
 type Pool interface {
-	// AddEvent adds a new event to the pool
-	AddEvent(ctx context.Context, data []byte, parents []string) error
+	// AddEvent adds a new event to the pool and returns the event ID
+	AddEvent(ctx context.Context, data []byte, parents []string) (string, error)
+
+	// Subscribe returns a channel that receives events as they are added to the DAG
+	Subscribe() (<-chan *dag.Event, error)
+
+	// Errors returns a channel of asynchronous errors from the pool
+	Errors() <-chan error
 
 	// Close closes the event pool
 	Close() error
@@ -55,7 +61,11 @@ type eventPool struct {
 	running  bool
 	cancel   context.CancelFunc
 	eventCh  chan *dag.Event
+	errCh    chan error // buffered channel for async errors
 	beaconCh <-chan *beacon.Round
+
+	// Subscribers for event notifications
+	subscribers []chan *dag.Event
 
 	// Track recent events for sub-event relationships
 	recentEvents []string
@@ -73,6 +83,9 @@ const (
 
 // ErrInvalidConfig indicates the pool configuration is invalid
 var ErrInvalidConfig = fmt.Errorf("invalid pool configuration")
+
+// ErrPoolClosed indicates the pool has been closed
+var ErrPoolClosed = fmt.Errorf("pool is closed")
 
 // NewPool creates a new event pool
 func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg Config) (Pool, error) {
@@ -110,6 +123,7 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 		dag:          d,
 		beacon:       b,
 		eventCh:      make(chan *dag.Event, 100),
+		errCh:        make(chan error, 100),
 		beaconCh:     beaconCh,
 		recentEvents: make([]string, 0, maxRecentEvents),
 	}
@@ -122,6 +136,49 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 	go p.run(ctx)
 
 	return p, nil
+}
+
+// Errors returns a channel of asynchronous errors from the pool
+func (p *eventPool) Errors() <-chan error {
+	return p.errCh
+}
+
+// Subscribe returns a channel that receives events as they are added to the DAG
+func (p *eventPool) Subscribe() (<-chan *dag.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.running {
+		return nil, ErrPoolClosed
+	}
+
+	ch := make(chan *dag.Event, 100)
+	p.subscribers = append(p.subscribers, ch)
+	return ch, nil
+}
+
+// notifySubscribers sends an event to all subscribers
+func (p *eventPool) notifySubscribers(event *dag.Event) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, ch := range p.subscribers {
+		select {
+		case ch <- event:
+		default:
+			// Subscriber channel full, skip
+		}
+	}
+}
+
+// sendError sends an error to the error channel if there is room
+func (p *eventPool) sendError(err error) {
+	select {
+	case p.errCh <- err:
+	default:
+		// Channel full, log and drop
+		log.Printf("Pool error (channel full): %v", err)
+	}
 }
 
 // computeEventCID computes and sets the content-addressed ID for an event.
@@ -221,9 +278,9 @@ func (p *eventPool) validateBeaconRound(round *beacon.Round) error {
 	return nil
 }
 
-func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string) error {
+func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string) (string, error) {
 	if !p.running {
-		return fmt.Errorf("pool is not running")
+		return "", ErrPoolClosed
 	}
 
 	event := &dag.Event{
@@ -234,14 +291,14 @@ func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string)
 
 	// Compute content-addressed ID
 	if err := computeEventCID(event); err != nil {
-		return err
+		return "", err
 	}
 
 	select {
 	case p.eventCh <- event:
-		return nil
+		return event.ID, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return "", ctx.Err()
 	}
 }
 
@@ -256,6 +313,12 @@ func (p *eventPool) Close() error {
 	p.cancel()
 	p.running = false
 	close(p.eventCh)
+
+	// Close all subscriber channels
+	for _, ch := range p.subscribers {
+		close(ch)
+	}
+	p.subscribers = nil
 
 	return nil
 }
@@ -276,9 +339,12 @@ func (p *eventPool) run(ctx context.Context) {
 		case event := <-p.eventCh:
 			// Add the event to the DAG
 			if err := p.dag.AddEvent(ctx, event); err != nil {
-				log.Printf("Failed to add event: %v", err)
+				p.sendError(fmt.Errorf("failed to add event %s: %w", event.ID, err))
 				continue
 			}
+
+			// Notify subscribers of the new event
+			p.notifySubscribers(event)
 
 			if p.cfg.Verbose {
 				log.Printf("Created main event %s", event.ID)
@@ -309,7 +375,7 @@ func (p *eventPool) run(ctx context.Context) {
 
 					// Compute content-addressed ID (after parents are set)
 					if err := computeEventCID(subEvent); err != nil {
-						log.Printf("Failed to compute sub-event CID: %v", err)
+						p.sendError(fmt.Errorf("failed to compute sub-event CID: %w", err))
 						continue
 					}
 
@@ -318,9 +384,13 @@ func (p *eventPool) run(ctx context.Context) {
 					}
 
 					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
-						log.Printf("Failed to add sub-event: %v", err)
+						p.sendError(fmt.Errorf("failed to add sub-event %s: %w", subEvent.ID, err))
 						continue
 					}
+
+					// Notify subscribers of the new sub-event
+					p.notifySubscribers(subEvent)
+
 					if p.cfg.Verbose {
 						log.Printf("  Created sub-event %s", subEvent.ID)
 					}
@@ -333,7 +403,7 @@ func (p *eventPool) run(ctx context.Context) {
 				// ALWAYS anchor - this ensures deterministic spine intervals
 				round, err := p.ensureBeaconRound(ctx)
 				if err != nil {
-					log.Printf("Failed to get beacon for anchoring: %v", err)
+					p.sendError(fmt.Errorf("failed to get beacon for anchoring: %w", err))
 					// Continue without anchoring this time, but don't reset counter
 					// This ensures we'll try again on the next event
 				} else {
@@ -349,7 +419,7 @@ func (p *eventPool) run(ctx context.Context) {
 							log.Printf("Anchored event %s to drand round %d", event.ID, round.Number)
 						}
 					} else {
-						log.Printf("Skipping stale beacon round %d (last: %d)", round.Number, p.lastBeaconRound)
+						p.sendError(fmt.Errorf("stale beacon round %d (last: %d)", round.Number, p.lastBeaconRound))
 						// Don't reset counter - we'll try again next time
 					}
 				}
@@ -357,7 +427,7 @@ func (p *eventPool) run(ctx context.Context) {
 
 		case <-verifyTicker.C:
 			if err := p.dag.Verify(ctx); err != nil {
-				log.Printf("DAG verification failed: %v", err)
+				p.sendError(fmt.Errorf("DAG verification failed: %w", err))
 			}
 		}
 	}

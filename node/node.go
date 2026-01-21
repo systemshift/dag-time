@@ -128,9 +128,29 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}, nil
 }
 
-// AddEvent adds a new event to the node's DAG
-func (n *Node) AddEvent(ctx context.Context, data []byte, parents []string) error {
+// AddEvent adds a new event to the node's DAG and returns the event ID
+func (n *Node) AddEvent(ctx context.Context, data []byte, parents []string) (string, error) {
 	return n.pool.AddEvent(ctx, data, parents)
+}
+
+// GetEvent retrieves an event by ID from the node's DAG
+func (n *Node) GetEvent(ctx context.Context, id string) (*dag.Event, error) {
+	return n.dag.GetEvent(ctx, id)
+}
+
+// GetMainEvents returns all main events in the node's DAG
+func (n *Node) GetMainEvents(ctx context.Context) ([]*dag.Event, error) {
+	return n.dag.GetMainEvents(ctx)
+}
+
+// DAG returns the underlying DAG interface
+func (n *Node) DAG() dag.DAG {
+	return n.dag
+}
+
+// Subscribe returns a channel that receives events as they are added to the DAG
+func (n *Node) Subscribe() (<-chan *dag.Event, error) {
+	return n.pool.Subscribe()
 }
 
 // Close shuts down the node and all its components

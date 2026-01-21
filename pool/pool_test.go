@@ -192,10 +192,10 @@ func TestPoolOperations(t *testing.T) {
 	require.NotNil(t, p)
 
 	// Test adding events
-	err = p.AddEvent(ctx, []byte("test1"), nil)
+	_, err = p.AddEvent(ctx, []byte("test1"), nil)
 	assert.NoError(t, err)
 
-	err = p.AddEvent(ctx, []byte("test2"), nil)
+	_, err = p.AddEvent(ctx, []byte("test2"), nil)
 	assert.NoError(t, err)
 
 	// Send a beacon round
@@ -212,6 +212,6 @@ func TestPoolOperations(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Adding events after close should fail
-	err = p.AddEvent(ctx, []byte("test3"), nil)
+	_, err = p.AddEvent(ctx, []byte("test3"), nil)
 	assert.Error(t, err)
 }

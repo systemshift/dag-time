@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -116,11 +115,22 @@ type mockPool struct {
 	closed bool
 }
 
-func (m *mockPool) AddEvent(ctx context.Context, data []byte, parents []string) error {
+func (m *mockPool) AddEvent(ctx context.Context, data []byte, parents []string) (string, error) {
 	if m.closed {
-		return fmt.Errorf("pool is closed")
+		return "", pool.ErrPoolClosed
 	}
-	return nil
+	return "mock-event-id", nil
+}
+
+func (m *mockPool) Subscribe() (<-chan *dag.Event, error) {
+	if m.closed {
+		return nil, pool.ErrPoolClosed
+	}
+	return make(chan *dag.Event), nil
+}
+
+func (m *mockPool) Errors() <-chan error {
+	return make(chan error)
 }
 
 func (m *mockPool) Close() error {
@@ -301,10 +311,10 @@ func TestNodeOperations(t *testing.T) {
 	}
 
 	// Test adding events
-	err := node.AddEvent(ctx, []byte("test1"), nil)
+	_, err := node.AddEvent(ctx, []byte("test1"), nil)
 	assert.NoError(t, err)
 
-	err = node.AddEvent(ctx, []byte("test2"), nil)
+	_, err = node.AddEvent(ctx, []byte("test2"), nil)
 	assert.NoError(t, err)
 
 	// Close the node
@@ -317,6 +327,6 @@ func TestNodeOperations(t *testing.T) {
 	assert.True(t, mocks.pool.closed)
 
 	// Adding events after close should fail
-	err = node.AddEvent(ctx, []byte("test3"), nil)
+	_, err = node.AddEvent(ctx, []byte("test3"), nil)
 	assert.Error(t, err)
 }

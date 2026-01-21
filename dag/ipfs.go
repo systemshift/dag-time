@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"sync"
 )
 
@@ -15,6 +16,8 @@ import (
 type IPFSConfig struct {
 	// APIURL is the IPFS HTTP API URL (default: http://localhost:5001)
 	APIURL string
+	// IndexPath is the optional path to persist the local index
+	IndexPath string
 }
 
 // ipfsDAG implements the DAG interface with IPFS storage
@@ -47,7 +50,48 @@ func NewIPFSDAG(cfg IPFSConfig) (DAG, error) {
 		return nil, fmt.Errorf("failed to connect to IPFS: %w", err)
 	}
 
+	// Load index from disk if configured
+	if cfg.IndexPath != "" {
+		if err := d.loadIndex(); err != nil {
+			// If file doesn't exist, that's fine - we start fresh
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("failed to load index: %w", err)
+			}
+		}
+	}
+
 	return d, nil
+}
+
+// loadIndex loads the local index from disk
+func (d *ipfsDAG) loadIndex() error {
+	f, err := os.Open(d.cfg.IndexPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return d.Import(context.Background(), f)
+}
+
+// SaveIndex saves the local index to disk
+func (d *ipfsDAG) SaveIndex() error {
+	if d.cfg.IndexPath == "" {
+		return nil
+	}
+
+	f, err := os.Create(d.cfg.IndexPath)
+	if err != nil {
+		return fmt.Errorf("failed to create index file: %w", err)
+	}
+	defer f.Close()
+
+	return d.Export(context.Background(), f)
+}
+
+// Close saves the index and cleans up resources
+func (d *ipfsDAG) Close() error {
+	return d.SaveIndex()
 }
 
 // ping checks if IPFS is reachable
@@ -130,8 +174,11 @@ func (d *ipfsDAG) storeEvent(ctx context.Context, event *Event) (string, error) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("IPFS add failed: %s", string(body))
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("IPFS add failed (status %d, read error: %w)", resp.StatusCode, readErr)
+		}
+		return "", fmt.Errorf("IPFS add failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var addResp ipfsAddResponse
@@ -156,8 +203,11 @@ func (d *ipfsDAG) fetchEvent(ctx context.Context, cid string) (*Event, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("IPFS cat failed: %s", string(body))
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("IPFS cat failed (status %d, read error: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("IPFS cat failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var data eventData
@@ -179,7 +229,7 @@ func (d *ipfsDAG) fetchEvent(ctx context.Context, cid string) (*Event, error) {
 
 func (d *ipfsDAG) AddEvent(ctx context.Context, event *Event) error {
 	if event == nil {
-		return fmt.Errorf("event cannot be nil")
+		return fmt.Errorf("%w: event cannot be nil", ErrInvalidEvent)
 	}
 
 	// If event has no ID, compute it
@@ -196,16 +246,16 @@ func (d *ipfsDAG) AddEvent(ctx context.Context, event *Event) error {
 
 	// Check if event already exists
 	if _, exists := d.events[event.ID]; exists {
-		return fmt.Errorf("event %s already exists", event.ID)
+		return fmt.Errorf("%w: %s", ErrDuplicateEvent, event.ID)
 	}
 
 	// For sub-events, verify parent exists
 	if event.Type == SubEvent {
 		if event.ParentID == "" {
-			return fmt.Errorf("sub-event must have a parent ID")
+			return fmt.Errorf("%w: sub-event must have a parent ID", ErrInvalidEvent)
 		}
 		if _, exists := d.events[event.ParentID]; !exists {
-			return fmt.Errorf("parent event %s not found", event.ParentID)
+			return fmt.Errorf("%w: %s", ErrMissingParent, event.ParentID)
 		}
 		d.children[event.ParentID] = append(d.children[event.ParentID], event.ID)
 	}
@@ -213,7 +263,7 @@ func (d *ipfsDAG) AddEvent(ctx context.Context, event *Event) error {
 	// Verify all parents exist
 	for _, parentID := range event.Parents {
 		if _, exists := d.events[parentID]; !exists {
-			return fmt.Errorf("parent event %s does not exist", parentID)
+			return fmt.Errorf("%w: %s", ErrMissingParent, parentID)
 		}
 		d.children[parentID] = append(d.children[parentID], event.ID)
 	}
@@ -422,7 +472,7 @@ func (d *ipfsDAG) Verify(ctx context.Context) error {
 					return err
 				}
 			} else if inStack[parentID] {
-				return fmt.Errorf("cycle detected involving events %s and %s", id, parentID)
+				return fmt.Errorf("%w: involving events %s and %s", ErrCycleDetected, id, parentID)
 			}
 		}
 
@@ -436,6 +486,30 @@ func (d *ipfsDAG) Verify(ctx context.Context) error {
 			}
 		}
 	}
+
+	return nil
+}
+
+// Export writes the DAG state to the provided writer
+func (d *ipfsDAG) Export(ctx context.Context, w io.Writer) error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	return ExportDAG(ctx, w, d.events, d.children)
+}
+
+// Import reads the DAG state from the provided reader
+func (d *ipfsDAG) Import(ctx context.Context, r io.Reader) error {
+	events, children, err := ImportDAG(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.events = events
+	d.children = children
 
 	return nil
 }

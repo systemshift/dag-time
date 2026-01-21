@@ -8,7 +8,11 @@ import (
 
 // Common errors
 var (
-	ErrNotFound = fmt.Errorf("event not found")
+	ErrNotFound       = fmt.Errorf("event not found")
+	ErrDuplicateEvent = fmt.Errorf("event already exists")
+	ErrInvalidEvent   = fmt.Errorf("invalid event")
+	ErrMissingParent  = fmt.Errorf("parent event not found")
+	ErrCycleDetected  = fmt.Errorf("cycle detected in DAG")
 )
 
 // EventType indicates whether an event is a main event or sub-event

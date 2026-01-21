@@ -53,7 +53,7 @@ func main() {
 				return
 			case <-ticker.C:
 				// Add event with some example data
-				if err := n.AddEvent(ctx, []byte("example-event"), nil); err != nil {
+				if _, err := n.AddEvent(ctx, []byte("example-event"), nil); err != nil {
 					log.Printf("Failed to add event: %v", err)
 				}
 			}

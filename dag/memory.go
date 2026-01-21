@@ -3,6 +3,7 @@ package dag
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -21,10 +22,10 @@ func NewMemoryDAG() DAG {
 
 func (d *memoryDAG) AddEvent(ctx context.Context, event *Event) error {
 	if event == nil {
-		return fmt.Errorf("event cannot be nil")
+		return fmt.Errorf("%w: event cannot be nil", ErrInvalidEvent)
 	}
 	if event.ID == "" {
-		return fmt.Errorf("event ID cannot be empty")
+		return fmt.Errorf("%w: event ID cannot be empty", ErrInvalidEvent)
 	}
 
 	d.mu.Lock()
@@ -32,17 +33,17 @@ func (d *memoryDAG) AddEvent(ctx context.Context, event *Event) error {
 
 	// Check if event already exists
 	if _, exists := d.events[event.ID]; exists {
-		return fmt.Errorf("event %s already exists", event.ID)
+		return fmt.Errorf("%w: %s", ErrDuplicateEvent, event.ID)
 	}
 
 	// For sub-events, verify parent exists
 	if event.Type == SubEvent {
 		if event.ParentID == "" {
-			return fmt.Errorf("sub-event must have a parent ID")
+			return fmt.Errorf("%w: sub-event must have a parent ID", ErrInvalidEvent)
 		}
 		parent, exists := d.events[event.ParentID]
 		if !exists {
-			return fmt.Errorf("parent event %s not found", event.ParentID)
+			return fmt.Errorf("%w: %s", ErrMissingParent, event.ParentID)
 		}
 		// Add this event to parent's children
 		parent.Children = append(parent.Children, event.ID)
@@ -51,7 +52,7 @@ func (d *memoryDAG) AddEvent(ctx context.Context, event *Event) error {
 	// Verify all parents exist
 	for _, parentID := range event.Parents {
 		if _, exists := d.events[parentID]; !exists {
-			return fmt.Errorf("parent event %s does not exist", parentID)
+			return fmt.Errorf("%w: %s", ErrMissingParent, parentID)
 		}
 		// Add this event to each parent's children
 		d.events[parentID].Children = append(d.events[parentID].Children, event.ID)
@@ -95,7 +96,7 @@ func (d *memoryDAG) GetParents(ctx context.Context, id string) ([]*Event, error)
 	for _, parentID := range event.Parents {
 		parent, exists := d.events[parentID]
 		if !exists {
-			return nil, fmt.Errorf("parent event %s not found", parentID)
+			return nil, fmt.Errorf("%w: %s", ErrMissingParent, parentID)
 		}
 		parents = append(parents, parent)
 	}
@@ -120,7 +121,7 @@ func (d *memoryDAG) GetChildren(ctx context.Context, id string) ([]*Event, error
 	for _, childID := range event.Children {
 		child, exists := d.events[childID]
 		if !exists {
-			return nil, fmt.Errorf("child event %s not found", childID)
+			return nil, fmt.Errorf("%w: child %s", ErrNotFound, childID)
 		}
 		children = append(children, child)
 	}
@@ -242,7 +243,7 @@ func (d *memoryDAG) Verify(ctx context.Context) error {
 					return err
 				}
 			} else if inStack[parentID] {
-				return fmt.Errorf("cycle detected involving events %s and %s", id, parentID)
+				return fmt.Errorf("%w: involving events %s and %s", ErrCycleDetected, id, parentID)
 			}
 		}
 
@@ -254,6 +255,45 @@ func (d *memoryDAG) Verify(ctx context.Context) error {
 			if err := checkCycle(id); err != nil {
 				return err
 			}
+		}
+	}
+
+	return nil
+}
+
+// Export writes the DAG state to the provided writer
+func (d *memoryDAG) Export(ctx context.Context, w io.Writer) error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	// Build children map from events
+	children := make(map[string][]string)
+	for _, event := range d.events {
+		if len(event.Children) > 0 {
+			children[event.ID] = event.Children
+		}
+	}
+
+	return ExportDAG(ctx, w, d.events, children)
+}
+
+// Import reads the DAG state from the provided reader
+func (d *memoryDAG) Import(ctx context.Context, r io.Reader) error {
+	events, children, err := ImportDAG(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Restore events
+	d.events = events
+
+	// Restore children references
+	for parentID, childIDs := range children {
+		if event, exists := d.events[parentID]; exists {
+			event.Children = childIDs
 		}
 	}
 
