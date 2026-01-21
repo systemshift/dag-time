@@ -108,4 +108,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	log.Printf("Received signal %v, shutting down...", sig)
+
+	// Cancel context to signal goroutines to stop
+	cancel()
+
+	// Close node (this will also run via defer, but explicit is clearer)
+	if err := n.Close(); err != nil {
+		log.Printf("Error during shutdown: %v", err)
+	}
+
+	log.Printf("Shutdown complete")
 }

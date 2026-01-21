@@ -112,6 +112,13 @@ func (d *drandBeacon) Stop() error {
 
 	d.cancel()
 	d.running = false
+
+	// Close all subscriber channels
+	for _, ch := range d.subscribers {
+		close(ch)
+	}
+	d.subscribers = nil
+
 	return nil
 }
 

@@ -60,6 +60,7 @@ type eventPool struct {
 	mu       sync.RWMutex
 	running  bool
 	cancel   context.CancelFunc
+	wg       sync.WaitGroup // tracks the run goroutine
 	eventCh  chan *dag.Event
 	errCh    chan error // buffered channel for async errors
 	beaconCh <-chan *beacon.Round
@@ -133,7 +134,11 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 	p.cancel = cancel
 	p.running = true
 
-	go p.run(ctx)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.run(ctx)
+	}()
 
 	return p, nil
 }
@@ -199,6 +204,9 @@ func (p *eventPool) shouldCreateSubEvent() bool {
 
 // selectRandomParents selects random parent events from recent events
 func (p *eventPool) selectRandomParents(count int) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	if len(p.recentEvents) == 0 {
 		return nil
 	}
@@ -225,6 +233,9 @@ func (p *eventPool) selectRandomParents(count int) []string {
 
 // addRecentEvent adds an event ID to the recent events list
 func (p *eventPool) addRecentEvent(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.recentEvents = append(p.recentEvents, id)
 	if len(p.recentEvents) > maxRecentEvents {
 		p.recentEvents = p.recentEvents[1:]
@@ -304,21 +315,29 @@ func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string)
 
 func (p *eventPool) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if !p.running {
+		p.mu.Unlock()
 		return nil
 	}
 
 	p.cancel()
 	p.running = false
+	p.mu.Unlock()
+
+	// Wait for the run goroutine to exit before closing channels
+	p.wg.Wait()
+
+	// Now it's safe to close channels
 	close(p.eventCh)
+	close(p.errCh)
 
 	// Close all subscriber channels
+	p.mu.Lock()
 	for _, ch := range p.subscribers {
 		close(ch)
 	}
 	p.subscribers = nil
+	p.mu.Unlock()
 
 	return nil
 }
