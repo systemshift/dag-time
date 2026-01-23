@@ -8,6 +8,7 @@ import (
 
 	"github.com/systemshift/dag-time/beacon"
 	"github.com/systemshift/dag-time/dag"
+	"github.com/systemshift/dag-time/hashpool"
 	"github.com/systemshift/dag-time/network"
 	"github.com/systemshift/dag-time/pool"
 )
@@ -30,14 +31,19 @@ type Config struct {
 	SubEventComplex float64
 	VerifyInterval  int
 	Verbose         bool
+
+	// Hashpool configuration
+	EnableHashpool bool
+	HashpoolConfig *hashpool.Config
 }
 
 // Node represents a complete DAG-Time node
 type Node struct {
-	network network.Node
-	dag     dag.DAG
-	beacon  beacon.Beacon
-	pool    pool.Pool
+	network         network.Node
+	dag             dag.DAG
+	beacon          beacon.Beacon
+	pool            pool.Pool
+	hashpoolAdapter *hashpool.Adapter
 }
 
 // ErrInvalidConfig indicates the node configuration is invalid
@@ -120,12 +126,48 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("failed to create pool: %w", err)
 	}
 
-	return &Node{
+	node := &Node{
 		network: n,
 		dag:     d,
 		beacon:  b,
 		pool:    p,
-	}, nil
+	}
+
+	// Optionally create hashpool adapter
+	if cfg.EnableHashpool {
+		hpCfg := hashpool.DefaultConfig()
+		if cfg.HashpoolConfig != nil {
+			hpCfg = *cfg.HashpoolConfig
+		}
+
+		adapter, err := hashpool.NewAdapter(ctx, hpCfg, p, d)
+		if err != nil {
+			if closeErr := p.Close(); closeErr != nil {
+				errs := []error{fmt.Errorf("failed to close pool: %w", closeErr)}
+				errs = append(errs, fmt.Errorf("failed to create hashpool adapter: %w", err))
+				return nil, fmt.Errorf("errors during cleanup: %v", errs)
+			}
+			if closeErr := b.Stop(); closeErr != nil {
+				n.Close()
+				return nil, fmt.Errorf("failed to stop beacon: %w", closeErr)
+			}
+			n.Close()
+			return nil, fmt.Errorf("failed to create hashpool adapter: %w", err)
+		}
+
+		// Start the adapter
+		if err := adapter.Start(ctx); err != nil {
+			adapter.Stop()
+			p.Close()
+			b.Stop()
+			n.Close()
+			return nil, fmt.Errorf("failed to start hashpool adapter: %w", err)
+		}
+
+		node.hashpoolAdapter = adapter
+	}
+
+	return node, nil
 }
 
 // AddEvent adds a new event to the node's DAG and returns the event ID
@@ -153,9 +195,30 @@ func (n *Node) Subscribe() (<-chan *dag.Event, error) {
 	return n.pool.Subscribe()
 }
 
+// HashpoolAdapter returns the hashpool adapter if enabled, nil otherwise
+func (n *Node) HashpoolAdapter() *hashpool.Adapter {
+	return n.hashpoolAdapter
+}
+
+// SubmitHash submits a hash to the hashpool
+// Returns an error if hashpool is not enabled
+func (n *Node) SubmitHash(hash [32]byte, nonce uint64) error {
+	if n.hashpoolAdapter == nil {
+		return fmt.Errorf("hashpool is not enabled")
+	}
+	return n.hashpoolAdapter.Submit(hash, nonce)
+}
+
 // Close shuts down the node and all its components
 func (n *Node) Close() error {
 	var errs []error
+
+	// Stop hashpool adapter first
+	if n.hashpoolAdapter != nil {
+		if err := n.hashpoolAdapter.Stop(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to stop hashpool adapter: %w", err))
+		}
+	}
 
 	if n.pool != nil {
 		if err := n.pool.Close(); err != nil {
