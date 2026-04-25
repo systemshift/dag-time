@@ -36,8 +36,15 @@ type Beacon interface {
 	// Stop stops fetching rounds
 	Stop() error
 
-	// Subscribe returns a channel that receives new rounds
+	// Subscribe returns a channel that receives new rounds.
+	// Slow subscribers will lose rounds: when the per-subscriber buffer
+	// (size 1) is full, the round is dropped silently. Use
+	// DroppedRounds to observe the drop count.
 	Subscribe() (<-chan *Round, error)
+
+	// DroppedRounds returns the cumulative count of round notifications
+	// dropped due to full subscriber buffers across all subscribers.
+	DroppedRounds() uint64
 }
 
 // Config represents beacon configuration

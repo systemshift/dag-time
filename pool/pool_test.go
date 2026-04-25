@@ -97,6 +97,10 @@ func (m *mockBeacon) Subscribe() (<-chan *beacon.Round, error) {
 	return m.roundCh, nil
 }
 
+func (m *mockBeacon) DroppedRounds() uint64 {
+	return 0
+}
+
 func TestNewPool(t *testing.T) {
 	tests := []struct {
 		name    string

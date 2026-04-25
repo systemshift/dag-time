@@ -190,8 +190,9 @@ func (n *Node) DAG() dag.DAG {
 	return n.dag
 }
 
-// Subscribe returns a channel that receives events as they are added to the DAG
-func (n *Node) Subscribe() (<-chan *dag.Event, error) {
+// Subscribe registers a subscriber and returns a Subscription handle.
+// Callers must call Unsubscribe on the handle when done.
+func (n *Node) Subscribe() (pool.Subscription, error) {
 	return n.pool.Subscribe()
 }
 

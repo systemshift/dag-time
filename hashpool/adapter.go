@@ -34,7 +34,17 @@ type Adapter struct {
 
 	mu      sync.RWMutex
 	running bool
+	ctx     context.Context // lifecycle ctx, cancelled by cancel
 	cancel  context.CancelFunc
+
+	// callbackWG tracks in-flight handleCommitment invocations so Stop
+	// can wait for them to drain before closing errCh.
+	callbackWG sync.WaitGroup
+
+	// errCh surfaces async errors from the commitment callback
+	// (marshal failures, AddEvent failures). Buffered so a non-draining
+	// caller does not block the hashpool callback.
+	errCh chan error
 }
 
 // NewAdapter creates a new hashpool-to-dagtime adapter
@@ -66,12 +76,29 @@ func NewAdapter(ctx context.Context, cfg Config, p pool.Pool, d dag.DAG) (*Adapt
 		hashpool: hpNode,
 		pool:     p,
 		dag:      d,
+		errCh:    make(chan error, 100),
 	}
 
 	// Set up callback for commitments
 	hpNode.SetOnCommitment(a.handleCommitment)
 
 	return a, nil
+}
+
+// Errors returns a channel of asynchronous errors raised while processing
+// hashpool commitments (marshal failures, AddEvent failures).
+func (a *Adapter) Errors() <-chan error {
+	return a.errCh
+}
+
+// sendError publishes an async error without blocking the hashpool callback.
+// If the error channel is full, the error is logged and dropped.
+func (a *Adapter) sendError(err error) {
+	select {
+	case a.errCh <- err:
+	default:
+		log.Printf("Adapter error (channel full): %v", err)
+	}
 }
 
 // Start begins processing hashpool commitments
@@ -83,6 +110,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	a.ctx = ctx
 	a.cancel = cancel
 	a.running = true
 	a.mu.Unlock()
@@ -117,13 +145,27 @@ func (a *Adapter) Stop() error {
 		log.Printf("Hashpool adapter stopping")
 	}
 
-	return a.hashpool.Stop()
+	err := a.hashpool.Stop()
+
+	// Wait for any in-flight callbacks to drain before closing errCh,
+	// so concurrent sendError calls cannot send on a closed channel.
+	a.callbackWG.Wait()
+	close(a.errCh)
+
+	return err
 }
 
 // handleCommitment processes a hashpool commitment and creates a dag-time event
 func (a *Adapter) handleCommitment(c *commitment.Commitment) {
 	a.mu.Lock()
+	if !a.running {
+		a.mu.Unlock()
+		return
+	}
+	a.callbackWG.Add(1)
+	defer a.callbackWG.Done()
 	lastEventID := a.lastEventID
+	ctx := a.ctx
 	a.mu.Unlock()
 
 	// Build event data
@@ -146,7 +188,7 @@ func (a *Adapter) handleCommitment(c *commitment.Commitment) {
 	// Serialize event data
 	data, err := json.Marshal(eventData)
 	if err != nil {
-		log.Printf("Failed to marshal commitment event: %v", err)
+		a.sendError(fmt.Errorf("failed to marshal commitment event for round %d: %w", c.Round, err))
 		return
 	}
 
@@ -156,11 +198,11 @@ func (a *Adapter) handleCommitment(c *commitment.Commitment) {
 		parents = []string{lastEventID}
 	}
 
-	// Add event to dag-time
-	ctx := context.Background()
+	// Add event to dag-time using the adapter's lifecycle ctx so the call
+	// aborts cleanly on Stop() instead of outliving shutdown.
 	eventID, err := a.pool.AddEvent(ctx, data, parents)
 	if err != nil {
-		log.Printf("Failed to add commitment event to DAG: %v", err)
+		a.sendError(fmt.Errorf("failed to add commitment event for round %d: %w", c.Round, err))
 		return
 	}
 

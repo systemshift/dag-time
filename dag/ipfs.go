@@ -10,6 +10,13 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
+)
+
+// Default timeouts for IPFS HTTP operations.
+const (
+	defaultIPFSConnectTimeout = 5 * time.Second
+	defaultIPFSOpTimeout      = 30 * time.Second
 )
 
 // IPFSConfig represents configuration for the IPFS DAG backend
@@ -18,6 +25,11 @@ type IPFSConfig struct {
 	APIURL string
 	// IndexPath is the optional path to persist the local index
 	IndexPath string
+	// ConnectTimeout bounds the initial ping. Zero uses defaultIPFSConnectTimeout.
+	ConnectTimeout time.Duration
+	// OperationTimeout bounds index load/save and other one-shot operations.
+	// Zero uses defaultIPFSOpTimeout.
+	OperationTimeout time.Duration
 }
 
 // ipfsDAG implements the DAG interface with IPFS storage
@@ -37,16 +49,26 @@ func NewIPFSDAG(cfg IPFSConfig) (DAG, error) {
 	if cfg.APIURL == "" {
 		cfg.APIURL = "http://localhost:5001"
 	}
+	if cfg.ConnectTimeout <= 0 {
+		cfg.ConnectTimeout = defaultIPFSConnectTimeout
+	}
+	if cfg.OperationTimeout <= 0 {
+		cfg.OperationTimeout = defaultIPFSOpTimeout
+	}
 
 	d := &ipfsDAG{
-		cfg:      cfg,
+		cfg: cfg,
+		// Per-request timeout via context; the http.Client itself does not
+		// need a timeout since each call attaches a deadline.
 		client:   &http.Client{},
 		events:   make(map[string]*Event),
 		children: make(map[string][]string),
 	}
 
-	// Verify IPFS connection
-	if err := d.ping(context.Background()); err != nil {
+	// Verify IPFS connection (bounded by ConnectTimeout).
+	pingCtx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
+	defer cancel()
+	if err := d.ping(pingCtx); err != nil {
 		return nil, fmt.Errorf("failed to connect to IPFS: %w", err)
 	}
 
@@ -71,7 +93,9 @@ func (d *ipfsDAG) loadIndex() error {
 	}
 	defer f.Close()
 
-	return d.Import(context.Background(), f)
+	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.OperationTimeout)
+	defer cancel()
+	return d.Import(ctx, f)
 }
 
 // SaveIndex saves the local index to disk
@@ -86,10 +110,13 @@ func (d *ipfsDAG) SaveIndex() error {
 	}
 	defer f.Close()
 
-	return d.Export(context.Background(), f)
+	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.OperationTimeout)
+	defer cancel()
+	return d.Export(ctx, f)
 }
 
-// Close saves the index and cleans up resources
+// Close saves the index and cleans up resources. The index save is bounded
+// by IPFSConfig.OperationTimeout so a hung daemon cannot block shutdown.
 func (d *ipfsDAG) Close() error {
 	return d.SaveIndex()
 }

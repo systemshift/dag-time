@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/systemshift/dag-time/dag"
+	"github.com/systemshift/dag-time/pool"
 	"github.com/systemshift/hashpool/pkg/pow"
 )
 
@@ -330,12 +331,16 @@ func (p *integrationPool) AddEvent(ctx context.Context, data []byte, parents []s
 	return id, nil
 }
 
-func (p *integrationPool) Subscribe() (<-chan *dag.Event, error) {
-	return p.eventCh, nil
+func (p *integrationPool) Subscribe() (pool.Subscription, error) {
+	return &mockSubscription{ch: p.eventCh}, nil
 }
 
 func (p *integrationPool) Errors() <-chan error {
 	return make(chan error)
+}
+
+func (p *integrationPool) DroppedNotifications() uint64 {
+	return 0
 }
 
 func (p *integrationPool) Close() error {

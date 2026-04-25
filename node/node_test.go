@@ -111,6 +111,10 @@ func (m *mockBeacon) Subscribe() (<-chan *beacon.Round, error) {
 	return ch, nil
 }
 
+func (m *mockBeacon) DroppedRounds() uint64 {
+	return 0
+}
+
 type mockPool struct {
 	closed bool
 }
@@ -122,15 +126,26 @@ func (m *mockPool) AddEvent(ctx context.Context, data []byte, parents []string) 
 	return "mock-event-id", nil
 }
 
-func (m *mockPool) Subscribe() (<-chan *dag.Event, error) {
+type mockSubscription struct {
+	ch chan *dag.Event
+}
+
+func (s *mockSubscription) Events() <-chan *dag.Event { return s.ch }
+func (s *mockSubscription) Unsubscribe()              { close(s.ch) }
+
+func (m *mockPool) Subscribe() (pool.Subscription, error) {
 	if m.closed {
 		return nil, pool.ErrPoolClosed
 	}
-	return make(chan *dag.Event), nil
+	return &mockSubscription{ch: make(chan *dag.Event)}, nil
 }
 
 func (m *mockPool) Errors() <-chan error {
 	return make(chan error)
+}
+
+func (m *mockPool) DroppedNotifications() uint64 {
+	return 0
 }
 
 func (m *mockPool) Close() error {

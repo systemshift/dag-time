@@ -10,8 +10,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/systemshift/dag-time/dag"
+	"github.com/systemshift/dag-time/pool"
 	"github.com/systemshift/hashpool/pkg/commitment"
 )
+
+type mockSubscription struct {
+	ch chan *dag.Event
+}
+
+func (s *mockSubscription) Events() <-chan *dag.Event { return s.ch }
+func (s *mockSubscription) Unsubscribe()              { close(s.ch) }
 
 // Mock pool implementation for testing
 type mockPool struct {
@@ -43,12 +51,16 @@ func (m *mockPool) AddEvent(ctx context.Context, data []byte, parents []string) 
 	return id, nil
 }
 
-func (m *mockPool) Subscribe() (<-chan *dag.Event, error) {
-	return m.eventCh, nil
+func (m *mockPool) Subscribe() (pool.Subscription, error) {
+	return &mockSubscription{ch: m.eventCh}, nil
 }
 
 func (m *mockPool) Errors() <-chan error {
 	return make(chan error)
+}
+
+func (m *mockPool) DroppedNotifications() uint64 {
+	return 0
 }
 
 func (m *mockPool) Close() error {
@@ -183,17 +195,13 @@ func TestAdapterNewNilDAG(t *testing.T) {
 }
 
 func TestHandleCommitmentCreatesEvent(t *testing.T) {
-	pool := newMockPool()
+	p := newMockPool()
 
 	// Create a minimal adapter to test handleCommitment directly
-	a := &Adapter{
-		cfg: Config{
-			IncludeFullHashes: false,
-			ChainCommitments:  true,
-		},
-		pool: pool,
-		dag:  newMockDAG(),
-	}
+	a := newTestAdapter(Config{
+		IncludeFullHashes: false,
+		ChainCommitments:  true,
+	}, p, newMockDAG())
 
 	// Create a test commitment
 	hashes := [][32]byte{
@@ -207,11 +215,11 @@ func TestHandleCommitmentCreatesEvent(t *testing.T) {
 	a.handleCommitment(c)
 
 	// Verify an event was created
-	require.Len(t, pool.events, 1)
+	require.Len(t, p.events, 1)
 
 	// Verify event data
 	var eventData CommitmentEvent
-	err = json.Unmarshal(pool.events[0].data, &eventData)
+	err = json.Unmarshal(p.events[0].data, &eventData)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(1), eventData.HashpoolRound)
@@ -221,16 +229,12 @@ func TestHandleCommitmentCreatesEvent(t *testing.T) {
 }
 
 func TestHandleCommitmentWithFullHashes(t *testing.T) {
-	pool := newMockPool()
+	p := newMockPool()
 
-	a := &Adapter{
-		cfg: Config{
-			IncludeFullHashes: true,
-			ChainCommitments:  false,
-		},
-		pool: pool,
-		dag:  newMockDAG(),
-	}
+	a := newTestAdapter(Config{
+		IncludeFullHashes: true,
+		ChainCommitments:  false,
+	}, p, newMockDAG())
 
 	hashes := [][32]byte{
 		sha256Hash("hash1"),
@@ -241,26 +245,22 @@ func TestHandleCommitmentWithFullHashes(t *testing.T) {
 
 	a.handleCommitment(c)
 
-	require.Len(t, pool.events, 1)
+	require.Len(t, p.events, 1)
 
 	var eventData CommitmentEvent
-	err = json.Unmarshal(pool.events[0].data, &eventData)
+	err = json.Unmarshal(p.events[0].data, &eventData)
 	require.NoError(t, err)
 
 	assert.Len(t, eventData.Hashes, 2)
 }
 
 func TestHandleCommitmentChaining(t *testing.T) {
-	pool := newMockPool()
+	p := newMockPool()
 
-	a := &Adapter{
-		cfg: Config{
-			IncludeFullHashes: false,
-			ChainCommitments:  true,
-		},
-		pool: pool,
-		dag:  newMockDAG(),
-	}
+	a := newTestAdapter(Config{
+		IncludeFullHashes: false,
+		ChainCommitments:  true,
+	}, p, newMockDAG())
 
 	// First commitment
 	hashes := [][32]byte{sha256Hash("hash1")}
@@ -273,27 +273,23 @@ func TestHandleCommitmentChaining(t *testing.T) {
 	require.NoError(t, err)
 	a.handleCommitment(c2)
 
-	require.Len(t, pool.events, 2)
+	require.Len(t, p.events, 2)
 
 	// First event should have no parents
-	assert.Empty(t, pool.events[0].parents)
+	assert.Empty(t, p.events[0].parents)
 
 	// Second event should have first as parent
-	require.Len(t, pool.events[1].parents, 1)
-	assert.Equal(t, pool.events[0].id, pool.events[1].parents[0])
+	require.Len(t, p.events[1].parents, 1)
+	assert.Equal(t, p.events[0].id, p.events[1].parents[0])
 }
 
 func TestHandleCommitmentNoChainingNoParents(t *testing.T) {
-	pool := newMockPool()
+	p := newMockPool()
 
-	a := &Adapter{
-		cfg: Config{
-			IncludeFullHashes: false,
-			ChainCommitments:  false,
-		},
-		pool: pool,
-		dag:  newMockDAG(),
-	}
+	a := newTestAdapter(Config{
+		IncludeFullHashes: false,
+		ChainCommitments:  false,
+	}, p, newMockDAG())
 
 	hashes := [][32]byte{sha256Hash("hash1")}
 	c1, err := commitment.New(1, time.Now(), hashes, "test-node")
@@ -304,23 +300,19 @@ func TestHandleCommitmentNoChainingNoParents(t *testing.T) {
 	require.NoError(t, err)
 	a.handleCommitment(c2)
 
-	require.Len(t, pool.events, 2)
+	require.Len(t, p.events, 2)
 
 	// Neither event should have parents when chaining is disabled
-	assert.Empty(t, pool.events[0].parents)
-	assert.Empty(t, pool.events[1].parents)
+	assert.Empty(t, p.events[0].parents)
+	assert.Empty(t, p.events[1].parents)
 }
 
 func TestLastEventID(t *testing.T) {
-	pool := newMockPool()
+	p := newMockPool()
 
-	a := &Adapter{
-		cfg: Config{
-			ChainCommitments: true,
-		},
-		pool: pool,
-		dag:  newMockDAG(),
-	}
+	a := newTestAdapter(Config{
+		ChainCommitments: true,
+	}, p, newMockDAG())
 
 	// Initially empty
 	assert.Empty(t, a.LastEventID())
@@ -333,7 +325,7 @@ func TestLastEventID(t *testing.T) {
 
 	// Should have the event ID
 	assert.NotEmpty(t, a.LastEventID())
-	assert.Equal(t, pool.events[0].id, a.LastEventID())
+	assert.Equal(t, p.events[0].id, a.LastEventID())
 }
 
 // Helper function to create a test hash
@@ -341,4 +333,17 @@ func sha256Hash(data string) [32]byte {
 	var hash [32]byte
 	copy(hash[:], []byte(data))
 	return hash
+}
+
+// newTestAdapter constructs a minimal Adapter that bypasses Start() but
+// satisfies handleCommitment's running/ctx/errCh preconditions.
+func newTestAdapter(cfg Config, p pool.Pool, d dag.DAG) *Adapter {
+	return &Adapter{
+		cfg:     cfg,
+		pool:    p,
+		dag:     d,
+		errCh:   make(chan error, 100),
+		ctx:     context.Background(),
+		running: true,
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,13 @@ type drandBeacon struct {
 	subscribers []chan *Round
 	running     bool
 	cancel      context.CancelFunc
+
+	droppedRounds uint64 // atomic
+}
+
+// DroppedRounds returns the cumulative count of dropped round notifications.
+func (d *drandBeacon) DroppedRounds() uint64 {
+	return atomic.LoadUint64(&d.droppedRounds)
 }
 
 type drandResponse struct {
@@ -151,8 +159,8 @@ func (d *drandBeacon) run(ctx context.Context, interval time.Duration) {
 				case ch <- round:
 					// Sent successfully
 				default:
-					// Channel full, skip this subscriber (non-blocking)
-					continue
+					// Channel full — drop and count
+					atomic.AddUint64(&d.droppedRounds, 1)
 				}
 			}
 			d.mu.RUnlock()

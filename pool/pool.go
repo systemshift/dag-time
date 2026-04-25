@@ -7,15 +7,13 @@ import (
 	"log"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/systemshift/dag-time/beacon"
 	"github.com/systemshift/dag-time/dag"
 )
-
-// Create a local random number generator
-var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // Config represents pool configuration
 type Config struct {
@@ -33,18 +31,42 @@ type Config struct {
 
 	// Verbose enables detailed logging of event relationships
 	Verbose bool
+
+	// RNGSeed seeds the per-pool RNG. Zero means use time.Now().UnixNano().
+	// Set explicitly for deterministic tests.
+	RNGSeed int64
+}
+
+// Subscription represents a registered subscriber to pool events.
+// Callers MUST call Unsubscribe when done to release the subscription channel.
+type Subscription interface {
+	// Events returns the channel that receives events. The channel is
+	// closed when the pool shuts down or Unsubscribe is called.
+	Events() <-chan *dag.Event
+
+	// Unsubscribe removes this subscription and closes the channel.
+	// Safe to call multiple times.
+	Unsubscribe()
 }
 
 // Pool manages a pool of events and handles event synchronization
 type Pool interface {
-	// AddEvent adds a new event to the pool and returns the event ID
+	// AddEvent adds a new event to the pool and returns the event ID.
+	// Returns ErrPoolClosed if the pool has been closed.
 	AddEvent(ctx context.Context, data []byte, parents []string) (string, error)
 
-	// Subscribe returns a channel that receives events as they are added to the DAG
-	Subscribe() (<-chan *dag.Event, error)
+	// Subscribe registers a new subscriber and returns a Subscription handle.
+	// Slow subscribers will lose events: when the per-subscriber buffer
+	// (size 100) is full, notifications for that subscriber are dropped
+	// silently. Use DroppedNotifications to observe the drop count.
+	Subscribe() (Subscription, error)
 
 	// Errors returns a channel of asynchronous errors from the pool
 	Errors() <-chan error
+
+	// DroppedNotifications returns the cumulative count of subscriber
+	// notifications dropped due to full buffers across all subscribers.
+	DroppedNotifications() uint64
 
 	// Close closes the event pool
 	Close() error
@@ -57,22 +79,44 @@ type eventPool struct {
 	dag    dag.DAG
 	beacon beacon.Beacon
 
-	mu       sync.RWMutex
-	running  bool
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup // tracks the run goroutine
-	eventCh  chan *dag.Event
-	errCh    chan error // buffered channel for async errors
-	beaconCh <-chan *beacon.Round
+	mu        sync.RWMutex
+	running   bool
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup // tracks the run goroutine
+	done      chan struct{}  // closed once Close is called
+	closeOnce sync.Once
+	eventCh   chan *dag.Event
+	errCh     chan error // buffered channel for async errors
+	beaconCh  <-chan *beacon.Round
 
 	// Subscribers for event notifications
-	subscribers []chan *dag.Event
+	subscribers []*subscription
 
 	// Track recent events for sub-event relationships
 	recentEvents []string
 
 	// Track last beacon round used for anchoring
 	lastBeaconRound uint64
+
+	// Per-pool RNG (math/rand.Rand is not goroutine-safe — protect with rngMu)
+	rngMu sync.Mutex
+	rng   *rand.Rand
+
+	// Atomic counter of subscriber notifications dropped due to full buffers.
+	droppedNotifications uint64
+}
+
+// subscription is the concrete Subscription implementation.
+type subscription struct {
+	ch   chan *dag.Event
+	pool *eventPool
+	once sync.Once
+}
+
+func (s *subscription) Events() <-chan *dag.Event { return s.ch }
+
+func (s *subscription) Unsubscribe() {
+	s.once.Do(func() { s.pool.removeSubscriber(s) })
 }
 
 const (
@@ -80,6 +124,8 @@ const (
 	maxRecentEvents = 100
 	// Maximum number of parents for a sub-event
 	maxSubEventParents = 3
+	// Per-subscriber buffer size
+	subscriberBufferSize = 100
 )
 
 // ErrInvalidConfig indicates the pool configuration is invalid
@@ -118,6 +164,11 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 		return nil, fmt.Errorf("failed to subscribe to beacon: %w", err)
 	}
 
+	seed := cfg.RNGSeed
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+
 	p := &eventPool{
 		cfg:          cfg,
 		host:         h,
@@ -126,7 +177,9 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 		eventCh:      make(chan *dag.Event, 100),
 		errCh:        make(chan error, 100),
 		beaconCh:     beaconCh,
+		done:         make(chan struct{}),
 		recentEvents: make([]string, 0, maxRecentEvents),
+		rng:          rand.New(rand.NewSource(seed)),
 	}
 
 	// Start processing events
@@ -148,8 +201,13 @@ func (p *eventPool) Errors() <-chan error {
 	return p.errCh
 }
 
-// Subscribe returns a channel that receives events as they are added to the DAG
-func (p *eventPool) Subscribe() (<-chan *dag.Event, error) {
+// DroppedNotifications returns the cumulative dropped-notification count.
+func (p *eventPool) DroppedNotifications() uint64 {
+	return atomic.LoadUint64(&p.droppedNotifications)
+}
+
+// Subscribe returns a Subscription handle.
+func (p *eventPool) Subscribe() (Subscription, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -157,9 +215,28 @@ func (p *eventPool) Subscribe() (<-chan *dag.Event, error) {
 		return nil, ErrPoolClosed
 	}
 
-	ch := make(chan *dag.Event, 100)
-	p.subscribers = append(p.subscribers, ch)
-	return ch, nil
+	s := &subscription{
+		ch:   make(chan *dag.Event, subscriberBufferSize),
+		pool: p,
+	}
+	p.subscribers = append(p.subscribers, s)
+	return s, nil
+}
+
+// removeSubscriber detaches a subscription and closes its channel.
+// Idempotent at the eventPool level: if the subscription is no longer
+// in the slice (e.g. already closed by Close), this is a no-op.
+func (p *eventPool) removeSubscriber(s *subscription) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i, existing := range p.subscribers {
+		if existing == s {
+			p.subscribers = append(p.subscribers[:i], p.subscribers[i+1:]...)
+			close(s.ch)
+			return
+		}
+	}
 }
 
 // notifySubscribers sends an event to all subscribers
@@ -167,11 +244,12 @@ func (p *eventPool) notifySubscribers(event *dag.Event) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	for _, ch := range p.subscribers {
+	for _, s := range p.subscribers {
 		select {
-		case ch <- event:
+		case s.ch <- event:
 		default:
-			// Subscriber channel full, skip
+			// Subscriber channel full — drop and count
+			atomic.AddUint64(&p.droppedNotifications, 1)
 		}
 	}
 }
@@ -197,29 +275,46 @@ func computeEventCID(event *dag.Event) error {
 	return nil
 }
 
+// rngFloat64 returns a random float64 from the per-pool RNG.
+func (p *eventPool) rngFloat64() float64 {
+	p.rngMu.Lock()
+	defer p.rngMu.Unlock()
+	return p.rng.Float64()
+}
+
+// rngIntn returns a random int in [0,n) from the per-pool RNG.
+func (p *eventPool) rngIntn(n int) int {
+	p.rngMu.Lock()
+	defer p.rngMu.Unlock()
+	return p.rng.Intn(n)
+}
+
 // shouldCreateSubEvent determines if we should create a sub-event
 func (p *eventPool) shouldCreateSubEvent() bool {
-	return rng.Float64() < p.cfg.SubEventComplex
+	return p.rngFloat64() < p.cfg.SubEventComplex
 }
 
 // selectRandomParents selects random parent events from recent events
 func (p *eventPool) selectRandomParents(count int) []string {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if len(p.recentEvents) == 0 {
+	recent := p.recentEvents
+	if len(recent) == 0 {
+		p.mu.RUnlock()
 		return nil
 	}
+	// Snapshot to avoid holding the lock across rng calls (which take their own lock).
+	snapshot := make([]string, len(recent))
+	copy(snapshot, recent)
+	p.mu.RUnlock()
 
-	// Randomly select up to count parents
 	parents := make([]string, 0, count)
 	seen := make(map[string]bool)
 
-	for i := 0; i < count && i < len(p.recentEvents); i++ {
+	for i := 0; i < count && i < len(snapshot); i++ {
 		// Try up to 5 times to find an unused parent
 		for j := 0; j < 5; j++ {
-			idx := rng.Intn(len(p.recentEvents))
-			id := p.recentEvents[idx]
+			idx := p.rngIntn(len(snapshot))
+			id := snapshot[idx]
 			if !seen[id] {
 				parents = append(parents, id)
 				seen[id] = true
@@ -290,8 +385,12 @@ func (p *eventPool) validateBeaconRound(round *beacon.Round) error {
 }
 
 func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string) (string, error) {
-	if !p.running {
+	// Fast-path closed check (race-free because p.done is closed exactly once
+	// and we never reopen it).
+	select {
+	case <-p.done:
 		return "", ErrPoolClosed
+	default:
 	}
 
 	event := &dag.Event{
@@ -305,40 +404,43 @@ func (p *eventPool) AddEvent(ctx context.Context, data []byte, parents []string)
 		return "", err
 	}
 
+	// p.eventCh is intentionally never closed — closing a channel with multiple
+	// senders is unsafe. p.done is the shutdown signal instead.
 	select {
 	case p.eventCh <- event:
 		return event.ID, nil
+	case <-p.done:
+		return "", ErrPoolClosed
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
 }
 
 func (p *eventPool) Close() error {
-	p.mu.Lock()
-	if !p.running {
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.running = false
+		close(p.done)
+		if p.cancel != nil {
+			p.cancel()
+		}
 		p.mu.Unlock()
-		return nil
-	}
 
-	p.cancel()
-	p.running = false
-	p.mu.Unlock()
+		// Wait for the run goroutine to exit before touching state it owns.
+		p.wg.Wait()
 
-	// Wait for the run goroutine to exit before closing channels
-	p.wg.Wait()
+		// Close errCh now that the only sender (run) has exited.
+		// eventCh is intentionally NOT closed — multiple senders.
+		close(p.errCh)
 
-	// Now it's safe to close channels
-	close(p.eventCh)
-	close(p.errCh)
-
-	// Close all subscriber channels
-	p.mu.Lock()
-	for _, ch := range p.subscribers {
-		close(ch)
-	}
-	p.subscribers = nil
-	p.mu.Unlock()
-
+		// Close any remaining subscriber channels (those not Unsubscribed).
+		p.mu.Lock()
+		for _, s := range p.subscribers {
+			close(s.ch)
+		}
+		p.subscribers = nil
+		p.mu.Unlock()
+	})
 	return nil
 }
 
@@ -374,7 +476,7 @@ func (p *eventPool) run(ctx context.Context) {
 
 			// Maybe create sub-events
 			if p.shouldCreateSubEvent() {
-				numSubEvents := rng.Intn(3) + 1 // 1-3 sub-events
+				numSubEvents := p.rngIntn(3) + 1 // 1-3 sub-events
 				if p.cfg.Verbose {
 					log.Printf("Creating %d sub-events for %s", numSubEvents, event.ID)
 				}
@@ -387,8 +489,8 @@ func (p *eventPool) run(ctx context.Context) {
 					}
 
 					// Maybe connect to other sub-events
-					if rng.Float64() < p.cfg.SubEventComplex {
-						parentCount := rng.Intn(maxSubEventParents) + 1
+					if p.rngFloat64() < p.cfg.SubEventComplex {
+						parentCount := p.rngIntn(maxSubEventParents) + 1
 						subEvent.Parents = p.selectRandomParents(parentCount)
 					}
 
