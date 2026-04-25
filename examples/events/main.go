@@ -3,7 +3,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +14,9 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+
 	// Create configuration with high sub-event complexity
 	cfg := node.Config{
 		Network: network.Config{
@@ -29,6 +32,7 @@ func main() {
 		SubEventComplex:   0.8,
 		VerifyInterval:    5,
 		Verbose:           true,
+		Logger:            logger,
 	}
 
 	// Create context
@@ -38,7 +42,8 @@ func main() {
 	// Create node
 	n, err := node.New(ctx, cfg)
 	if err != nil {
-		log.Fatalf("Failed to create node: %v", err)
+		logger.Error("failed to create node", "err", err)
+		os.Exit(1)
 	}
 	defer n.Close()
 
@@ -54,17 +59,17 @@ func main() {
 			case <-ticker.C:
 				// Add event with some example data
 				if _, err := n.AddEvent(ctx, []byte("example-event"), nil); err != nil {
-					log.Printf("Failed to add event: %v", err)
+					logger.Error("failed to add event", "err", err)
 				}
 			}
 		}
 	}()
 
-	log.Printf("Creating events every second. Press Ctrl+C to stop.")
+	logger.Info("creating events every second", "info", "press Ctrl+C to stop")
 
 	// Wait for interrupt
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	log.Printf("Received signal %v, shutting down...", sig)
+	logger.Info("received signal, shutting down", "signal", sig.String())
 }

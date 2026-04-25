@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,18 +33,35 @@ func main() {
 	anchorInterval := flag.Int("anchor-interval", 5, "Events before anchoring to drand beacon")
 	subEventComplex := flag.Float64("subevent-complexity", 0.3, "Probability of creating sub-events and cross-event relationships (0.0-1.0)")
 	verifyInterval := flag.Int("verify-interval", 5, "Events between verifications")
-	verbose := flag.Bool("verbose", false, "Enable verbose logging of event relationships")
+	verbose := flag.Bool("verbose", false, "Enable verbose (debug-level) logging")
+	logJSON := flag.Bool("log-json", false, "Emit logs as JSON instead of text")
 	flag.Parse()
+
+	level := slog.LevelInfo
+	if *verbose {
+		level = slog.LevelDebug
+	}
+	handlerOpts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	if *logJSON {
+		handler = slog.NewJSONHandler(os.Stderr, handlerOpts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, handlerOpts)
+	}
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 
 	// Parse hex values
 	chainHash, err := hex.DecodeString(*beaconChainHash)
 	if err != nil {
-		log.Fatalf("Invalid chain hash: %v", err)
+		logger.Error("invalid chain hash", "err", err)
+		os.Exit(1)
 	}
 
 	publicKey, err := hex.DecodeString(*beaconPublicKey)
 	if err != nil {
-		log.Fatalf("Invalid public key: %v", err)
+		logger.Error("invalid public key", "err", err)
+		os.Exit(1)
 	}
 
 	// Create configuration
@@ -62,11 +79,14 @@ func main() {
 		AnchorInterval:    *anchorInterval,
 		SubEventComplex:   *subEventComplex,
 		VerifyInterval:    *verifyInterval,
+		Verbose:           *verbose,
+		Logger:            logger,
 	}
 
 	// Validate configuration
 	if err := node.ValidateConfig(cfg); err != nil {
-		log.Fatalf("Invalid configuration: %v", err)
+		logger.Error("invalid configuration", "err", err)
+		os.Exit(1)
 	}
 
 	// Create context
@@ -76,46 +96,36 @@ func main() {
 	// Create node
 	n, err := node.New(ctx, cfg)
 	if err != nil {
-		log.Fatalf("Failed to create node: %v", err)
+		logger.Error("failed to create node", "err", err)
+		os.Exit(1)
 	}
 	defer n.Close()
 
-	// Log startup
-	log.Printf("DAG-Time node started with configuration:")
-	log.Printf("  Port: %d", *port)
-	if *peer != "" {
-		log.Printf("  Peer: %s", *peer)
-	}
-	log.Printf("  Beacon URL: %s", *beaconURL)
-	log.Printf("  Beacon Interval: %v", *beaconInterval)
-	log.Printf("  Beacon Chain Hash: %s", *beaconChainHash)
-	log.Printf("  Event Rate: %dms", *eventRate)
-	log.Printf("  Anchor Interval: %d events", *anchorInterval)
-	log.Printf("  Sub-Event Complexity: %.2f", *subEventComplex)
-	log.Printf("  Verify Interval: %d events", *verifyInterval)
-	log.Printf("  Verbose Logging: %v", *verbose)
-
-	if *verbose {
-		log.Printf("\nEvent relationships will be logged as they are created.")
-		log.Printf("- Main events are top-level events in the DAG")
-		log.Printf("- Sub-events are spawned by main events")
-		log.Printf("- Sub-events can connect to other sub-events")
-		log.Printf("- Higher complexity means more sub-events and connections")
-	}
+	logger.Info("dag-time node started",
+		"port", *port,
+		"peer", *peer,
+		"beacon_url", *beaconURL,
+		"beacon_interval", *beaconInterval,
+		"beacon_chain_hash", *beaconChainHash,
+		"event_rate_ms", *eventRate,
+		"anchor_interval", *anchorInterval,
+		"subevent_complexity", *subEventComplex,
+		"verify_interval", *verifyInterval,
+		"verbose", *verbose)
 
 	// Wait for interrupt
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	log.Printf("Received signal %v, shutting down...", sig)
+	logger.Info("received signal, shutting down", "signal", sig.String())
 
 	// Cancel context to signal goroutines to stop
 	cancel()
 
 	// Close node (this will also run via defer, but explicit is clearer)
 	if err := n.Close(); err != nil {
-		log.Printf("Error during shutdown: %v", err)
+		logger.Error("error during shutdown", "err", err)
 	}
 
-	log.Printf("Shutdown complete")
+	logger.Info("shutdown complete")
 }

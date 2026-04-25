@@ -3,6 +3,7 @@ package hashpool
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -345,5 +346,6 @@ func newTestAdapter(cfg Config, p pool.Pool, d dag.DAG) *Adapter {
 		errCh:   make(chan error, 100),
 		ctx:     context.Background(),
 		running: true,
+		logger:  slog.Default(),
 	}
 }

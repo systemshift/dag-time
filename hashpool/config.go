@@ -3,6 +3,7 @@
 package hashpool
 
 import (
+	"log/slog"
 	"time"
 )
 
@@ -25,8 +26,14 @@ type Config struct {
 	// ChainCommitments links commitments sequentially as DAG events
 	ChainCommitments bool
 
-	// Verbose enables detailed logging
+	// Verbose enables detailed logging.
+	// When Logger is nil, Verbose=true installs a Debug-level stderr handler.
+	// When Logger is non-nil, Verbose is ignored.
 	Verbose bool
+
+	// Logger is the structured logger used by the adapter. Nil uses
+	// slog.Default() (Verbose may bump it to Debug — see above).
+	Logger *slog.Logger
 }
 
 // DefaultConfig returns a configuration with sensible defaults

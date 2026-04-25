@@ -4,6 +4,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/systemshift/dag-time/beacon"
@@ -35,6 +36,10 @@ type Config struct {
 	// Hashpool configuration
 	EnableHashpool bool
 	HashpoolConfig *hashpool.Config
+
+	// Logger is the structured logger plumbed through to subpackages.
+	// Nil uses slog.Default() (Verbose may bump it to Debug).
+	Logger *slog.Logger
 }
 
 // Node represents a complete DAG-Time node
@@ -114,6 +119,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		SubEventComplex: cfg.SubEventComplex,
 		VerifyInterval:  cfg.VerifyInterval,
 		Verbose:         cfg.Verbose,
+		Logger:          cfg.Logger,
 	})
 	if err != nil {
 		if err := b.Stop(); err != nil {
@@ -138,6 +144,9 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		hpCfg := hashpool.DefaultConfig()
 		if cfg.HashpoolConfig != nil {
 			hpCfg = *cfg.HashpoolConfig
+		}
+		if hpCfg.Logger == nil {
+			hpCfg.Logger = cfg.Logger
 		}
 
 		adapter, err := hashpool.NewAdapter(ctx, hpCfg, p, d)

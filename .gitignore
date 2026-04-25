@@ -5,7 +5,7 @@
 *.so
 *.dylib
 bin/
-dagtime
+/dagtime
 
 # Test binary, built with `go test -c`
 *.test

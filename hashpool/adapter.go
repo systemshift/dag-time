@@ -5,7 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/systemshift/dag-time/dag"
@@ -45,6 +46,8 @@ type Adapter struct {
 	// (marshal failures, AddEvent failures). Buffered so a non-draining
 	// caller does not block the hashpool callback.
 	errCh chan error
+
+	logger *slog.Logger
 }
 
 // NewAdapter creates a new hashpool-to-dagtime adapter
@@ -71,12 +74,23 @@ func NewAdapter(ctx context.Context, cfg Config, p pool.Pool, d dag.DAG) (*Adapt
 		return nil, fmt.Errorf("failed to create hashpool node: %w", err)
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		opts := &slog.HandlerOptions{}
+		if cfg.Verbose {
+			opts.Level = slog.LevelDebug
+		}
+		logger = slog.New(slog.NewTextHandler(os.Stderr, opts))
+	}
+	logger = logger.With("component", "hashpool-adapter")
+
 	a := &Adapter{
 		cfg:      cfg,
 		hashpool: hpNode,
 		pool:     p,
 		dag:      d,
 		errCh:    make(chan error, 100),
+		logger:   logger,
 	}
 
 	// Set up callback for commitments
@@ -97,7 +111,7 @@ func (a *Adapter) sendError(err error) {
 	select {
 	case a.errCh <- err:
 	default:
-		log.Printf("Adapter error (channel full): %v", err)
+		a.logger.Warn("error channel full, dropping error", "err", err)
 	}
 }
 
@@ -123,9 +137,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start hashpool: %w", err)
 	}
 
-	if a.cfg.Verbose {
-		log.Printf("Hashpool adapter started")
-	}
+	a.logger.Info("hashpool adapter started")
 
 	return nil
 }
@@ -141,9 +153,7 @@ func (a *Adapter) Stop() error {
 	a.running = false
 	a.mu.Unlock()
 
-	if a.cfg.Verbose {
-		log.Printf("Hashpool adapter stopping")
-	}
+	a.logger.Info("hashpool adapter stopping")
 
 	err := a.hashpool.Stop()
 
@@ -211,10 +221,10 @@ func (a *Adapter) handleCommitment(c *commitment.Commitment) {
 	a.lastEventID = eventID
 	a.mu.Unlock()
 
-	if a.cfg.Verbose {
-		log.Printf("Created dag-time event %s for hashpool round %d (%d hashes)",
-			eventID, c.Round, len(c.Hashes))
-	}
+	a.logger.Debug("created dag-time event for hashpool commitment",
+		"event_id", eventID,
+		"hashpool_round", c.Round,
+		"hash_count", len(c.Hashes))
 }
 
 // Submit submits a hash to the hashpool

@@ -4,8 +4,9 @@ package pool
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,12 +30,19 @@ type Config struct {
 	// VerifyInterval is events between verifications
 	VerifyInterval int
 
-	// Verbose enables detailed logging of event relationships
+	// Verbose enables detailed logging of event relationships.
+	// When Logger is nil, Verbose=true installs a Debug-level stderr
+	// handler. When Logger is non-nil, Verbose is ignored — control the
+	// level on your own handler.
 	Verbose bool
 
 	// RNGSeed seeds the per-pool RNG. Zero means use time.Now().UnixNano().
 	// Set explicitly for deterministic tests.
 	RNGSeed int64
+
+	// Logger is the structured logger used by the pool. Nil uses
+	// slog.Default() (Verbose may bump it to Debug — see above).
+	Logger *slog.Logger
 }
 
 // Subscription represents a registered subscriber to pool events.
@@ -104,6 +112,8 @@ type eventPool struct {
 
 	// Atomic counter of subscriber notifications dropped due to full buffers.
 	droppedNotifications uint64
+
+	logger *slog.Logger
 }
 
 // subscription is the concrete Subscription implementation.
@@ -169,6 +179,16 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 		seed = time.Now().UnixNano()
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		opts := &slog.HandlerOptions{}
+		if cfg.Verbose {
+			opts.Level = slog.LevelDebug
+		}
+		logger = slog.New(slog.NewTextHandler(os.Stderr, opts))
+	}
+	logger = logger.With("component", "pool")
+
 	p := &eventPool{
 		cfg:          cfg,
 		host:         h,
@@ -180,6 +200,7 @@ func NewPool(ctx context.Context, h host.Host, d dag.DAG, b beacon.Beacon, cfg C
 		done:         make(chan struct{}),
 		recentEvents: make([]string, 0, maxRecentEvents),
 		rng:          rand.New(rand.NewSource(seed)),
+		logger:       logger,
 	}
 
 	// Start processing events
@@ -259,8 +280,8 @@ func (p *eventPool) sendError(err error) {
 	select {
 	case p.errCh <- err:
 	default:
-		// Channel full, log and drop
-		log.Printf("Pool error (channel full): %v", err)
+		// Channel full — log and drop.
+		p.logger.Warn("error channel full, dropping error", "err", err)
 	}
 }
 
@@ -467,9 +488,7 @@ func (p *eventPool) run(ctx context.Context) {
 			// Notify subscribers of the new event
 			p.notifySubscribers(event)
 
-			if p.cfg.Verbose {
-				log.Printf("Created main event %s", event.ID)
-			}
+			p.logger.Debug("created main event", "id", event.ID)
 
 			// Track the event
 			p.addRecentEvent(event.ID)
@@ -477,9 +496,7 @@ func (p *eventPool) run(ctx context.Context) {
 			// Maybe create sub-events
 			if p.shouldCreateSubEvent() {
 				numSubEvents := p.rngIntn(3) + 1 // 1-3 sub-events
-				if p.cfg.Verbose {
-					log.Printf("Creating %d sub-events for %s", numSubEvents, event.ID)
-				}
+				p.logger.Debug("creating sub-events", "count", numSubEvents, "parent", event.ID)
 
 				for i := 0; i < numSubEvents; i++ {
 					subEvent := &dag.Event{
@@ -500,10 +517,6 @@ func (p *eventPool) run(ctx context.Context) {
 						continue
 					}
 
-					if p.cfg.Verbose && len(subEvent.Parents) > 0 {
-						log.Printf("  Sub-event %s connects to: %v", subEvent.ID, subEvent.Parents)
-					}
-
 					if err := p.dag.AddEvent(ctx, subEvent); err != nil {
 						p.sendError(fmt.Errorf("failed to add sub-event %s: %w", subEvent.ID, err))
 						continue
@@ -512,9 +525,10 @@ func (p *eventPool) run(ctx context.Context) {
 					// Notify subscribers of the new sub-event
 					p.notifySubscribers(subEvent)
 
-					if p.cfg.Verbose {
-						log.Printf("  Created sub-event %s", subEvent.ID)
-					}
+					p.logger.Debug("created sub-event",
+						"id", subEvent.ID,
+						"parent", subEvent.ParentID,
+						"connects_to", subEvent.Parents)
 					p.addRecentEvent(subEvent.ID)
 				}
 			}
@@ -536,9 +550,7 @@ func (p *eventPool) run(ctx context.Context) {
 						}
 						p.lastBeaconRound = round.Number
 						eventCount = 0
-						if p.cfg.Verbose {
-							log.Printf("Anchored event %s to drand round %d", event.ID, round.Number)
-						}
+						p.logger.Debug("anchored event", "event_id", event.ID, "drand_round", round.Number)
 					} else {
 						p.sendError(fmt.Errorf("stale beacon round %d (last: %d)", round.Number, p.lastBeaconRound))
 						// Don't reset counter - we'll try again next time
