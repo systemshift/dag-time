@@ -8,7 +8,7 @@ require (
 	github.com/multiformats/go-multiaddr v0.14.0
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/stretchr/testify v1.10.0
-	github.com/systemshift/hashpool v0.0.0
+	github.com/systemshift/hashpool v0.1.0
 )
 
 require (
